@@ -49,6 +49,16 @@ try:
 except ImportError:
     sys.exit("Install requests:  pip install requests")
 
+# Optional: OS keyring for secure password storage. Falls back to plaintext file if unavailable.
+try:
+    import keyring as _keyring
+    HAVE_KEYRING = True
+except ImportError:
+    _keyring = None
+    HAVE_KEYRING = False
+
+KEYRING_SERVICE = "Helmsman"
+
 
 # Optional environment overrides — purely conveniences, all overridable in the web UI.
 DEFAULT_NVR_IP   = os.environ.get("HELMSMAN_NVR_IP", "")
@@ -74,7 +84,6 @@ def save_config(cfg: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     try:
-        # 0600 on POSIX. On Windows the file lives under the user profile already.
         os.chmod(CONFIG_FILE, stat.S_IRUSR | stat.S_IWUSR)
     except Exception:
         pass
@@ -85,17 +94,63 @@ def forget_config() -> None:
         CONFIG_FILE.unlink()
     except FileNotFoundError:
         pass
+    if HAVE_KEYRING:
+        try:
+            cfg = load_config()
+            user = cfg.get("user")
+            if user:
+                _keyring.delete_password(KEYRING_SERVICE, user)
+        except Exception:
+            pass
+
+
+def store_password(user: str, pw: str) -> str:
+    """Persist password. Returns 'keyring' or 'file' depending on backend used."""
+    if HAVE_KEYRING and user:
+        try:
+            _keyring.set_password(KEYRING_SERVICE, user, pw)
+            return "keyring"
+        except Exception:
+            pass
+    return "file"
+
+
+def fetch_password(user: str) -> str:
+    if HAVE_KEYRING and user:
+        try:
+            v = _keyring.get_password(KEYRING_SERVICE, user)
+            if v:
+                return v
+        except Exception:
+            pass
+    return ""
 
 
 def effective_defaults() -> dict:
     """Env vars win over saved config (for explicit overrides at launch)."""
     saved = load_config()
+    user = saved.get("user", "")
+    pw = ""
+    if saved.get("save_password"):
+        # Try keyring first, fall back to plaintext file
+        pw = fetch_password(user) or saved.get("pass", "")
     return {
         "ip":   DEFAULT_NVR_IP   or saved.get("ip", ""),
-        "user": DEFAULT_USERNAME or saved.get("user", ""),
-        "pass": DEFAULT_PASSWORD or saved.get("pass", ""),
-        "saved": bool(saved.get("ip") or saved.get("user") or saved.get("pass")),
+        "user": DEFAULT_USERNAME or user,
+        "pass": DEFAULT_PASSWORD or pw,
+        "saved": bool(saved.get("ip") or saved.get("user") or saved.get("pass") or pw),
+        "cam_settings": saved.get("cam_settings", {}),  # per-camera axis flips etc.
     }
+
+
+def update_cam_settings(cam_id: str, patch: dict) -> dict:
+    cfg = load_config()
+    cs = cfg.setdefault("cam_settings", {})
+    cur = cs.get(cam_id, {})
+    cur.update(patch)
+    cs[cam_id] = cur
+    save_config(cfg)
+    return cur
 
 
 class Nvr:
@@ -163,8 +218,80 @@ class Nvr:
         except Exception:
             return r.status_code, None, r.text
 
+    def save_preset(self, cam_id: str, name: str = ""):
+        body = {"name": name} if name else {}
+        r = self.s.post(f"https://{self.ip}/proxy/protect/api/cameras/{cam_id}/ptz/preset",
+                        headers=self._hdrs("application/json"),
+                        data=json.dumps(body), timeout=10)
+        return r.status_code, r.text
+
+    def rename_preset(self, cam_id: str, slot: int, name: str):
+        r = self.s.patch(f"https://{self.ip}/proxy/protect/api/cameras/{cam_id}/ptz/preset/{slot}",
+                         headers=self._hdrs("application/json"),
+                         data=json.dumps({"name": name}), timeout=10)
+        return r.status_code, r.text
+
+    def delete_preset(self, cam_id: str, slot: int):
+        r = self.s.delete(f"https://{self.ip}/proxy/protect/api/cameras/{cam_id}/ptz/preset/{slot}",
+                          headers=self._hdrs(), timeout=10)
+        return r.status_code, r.text
+
+    def snapshot(self, cam_id: str, hires: bool = False):
+        url = f"https://{self.ip}/proxy/protect/api/cameras/{cam_id}/snapshot"
+        if hires:
+            url += "?force=true"
+        r = self.s.get(url, headers=self._hdrs(), timeout=15)
+        return r.status_code, r.headers.get("Content-Type", "image/jpeg"), r.content
+
+    def locate(self, cam_id: str):
+        r = self.s.post(f"https://{self.ip}/proxy/protect/api/cameras/{cam_id}/locate",
+                        headers=self._hdrs(), timeout=10)
+        return r.status_code, r.text
+
+    def flashlight(self, cam_id: str, enable: bool):
+        r = self.s.post(f"https://{self.ip}/proxy/protect/api/cameras/{cam_id}/turnon-flashlight",
+                        headers=self._hdrs("application/json"),
+                        data=json.dumps({"enable": enable}), timeout=10)
+        return r.status_code, r.text
+
+    def patch_camera(self, cam_id: str, patch: dict):
+        r = self.s.patch(f"https://{self.ip}/proxy/protect/api/cameras/{cam_id}",
+                         headers=self._hdrs("application/json"),
+                         data=json.dumps(patch), timeout=10)
+        return r.status_code, r.text
+
+    def get_camera(self, cam_id: str):
+        r = self.s.get(f"https://{self.ip}/proxy/protect/api/cameras/{cam_id}",
+                       headers=self._hdrs(), timeout=10)
+        try:
+            return r.status_code, r.json(), r.text
+        except Exception:
+            return r.status_code, None, r.text
+
 
 nvr = Nvr("")
+
+# Optional: Telegram notify hook. Set both env vars to enable.
+TELEGRAM_BOT   = os.environ.get("HELMSMAN_TELEGRAM_BOT", "")
+TELEGRAM_CHAT  = os.environ.get("HELMSMAN_TELEGRAM_CHAT", "")
+_telegram_last = 0.0
+_telegram_lock = threading.Lock()
+
+def telegram_notify(msg: str, throttle_sec: float = 60.0) -> None:
+    if not (TELEGRAM_BOT and TELEGRAM_CHAT):
+        return
+    global _telegram_last
+    import time as _t
+    with _telegram_lock:
+        now = _t.time()
+        if now - _telegram_last < throttle_sec:
+            return
+        _telegram_last = now
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT}/sendMessage",
+                      json={"chat_id": TELEGRAM_CHAT, "text": msg}, timeout=5)
+    except Exception:
+        pass
 
 
 HTML = r"""<!doctype html>
@@ -205,8 +332,14 @@ HTML = r"""<!doctype html>
     background: var(--surface2); border: 1px solid var(--border); }
   .badge.ok { background: var(--green); color: #11111b; border-color: var(--green); }
   .badge.bad { background: var(--red); color: #11111b; border-color: var(--red); }
-  #stick { background: #11111b; border-radius: 50%; touch-action: none; cursor: grab; user-select: none; }
+  #stick { background: #11111b; border-radius: 50%; touch-action: none; cursor: grab; user-select: none;
+    position: relative; z-index: 2; }
   #stick:active { cursor: grabbing; }
+  .helm-wrap { position: relative; }
+  #snap { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: 320px; height: 320px; border-radius: 50%; object-fit: cover; opacity: 0.5;
+    z-index: 1; pointer-events: none; transition: opacity 0.3s; }
+  #snap.live { opacity: 0.85; }
   #zoom { background: #11111b; border-radius: 8px; touch-action: none; cursor: ns-resize;
     user-select: none; width: 50px; }
   .axes { display: grid; grid-template-columns: auto 1fr auto; gap: 6px 10px;
@@ -299,14 +432,57 @@ HTML = r"""<!doctype html>
     <label>Send rate: <span id="rateLbl">10 Hz</span></label>
     <input id="rate" type="range" min="2" max="20" value="10"/>
 
+    <h2>Camera</h2>
+    <div class="row" style="gap:6px;flex-wrap:wrap">
+      <button id="btnLocate"   style="flex:1 1 30%">Locate (LED)</button>
+      <button id="btnFlash"    style="flex:1 1 30%">Flashlight</button>
+      <button id="btnSnap"     style="flex:1 1 30%">Live preview</button>
+    </div>
+    <label style="margin-top:10px">IR night mode</label>
+    <select id="irMode">
+      <option value="">—</option>
+      <option value="auto">auto</option>
+      <option value="on">on</option>
+      <option value="off">off</option>
+      <option value="autoFilterOnly">auto (filter only)</option>
+    </select>
+    <div class="row" style="gap:14px;margin-top:8px;font-size:11px;color:var(--subtext)">
+      <label style="margin:0;display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="invertX" style="width:auto"/> invert X
+      </label>
+      <label style="margin:0;display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="invertY" style="width:auto"/> invert Y
+      </label>
+      <label style="margin:0;display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="invertZ" style="width:auto"/> invert Z
+      </label>
+    </div>
+
     <h2>Presets <span class="badge" id="presetCount">—</span></h2>
     <div id="presetGrid" class="grid3"></div>
+    <div style="font-size:10px;color:var(--subtext);margin-top:6px">
+      <span class="key">Shift</span>+click empty = save here · <span class="key">Alt</span>+click = delete
+    </div>
+
+    <h2>Recorder <span class="badge" id="recBadge" style="display:none">REC</span></h2>
+    <div class="row" style="gap:6px">
+      <button id="btnRec"  style="flex:1">● REC</button>
+      <button id="btnPlay" style="flex:1" disabled>▶ Play</button>
+    </div>
+    <select id="sceneSelect" style="margin-top:6px"><option value="">(no scenes)</option></select>
+    <div class="row" style="gap:6px;margin-top:6px">
+      <button id="btnSaveScene" style="flex:1">Save</button>
+      <button id="btnDelScene"  style="flex:1">Delete</button>
+    </div>
   </div>
 
   <div class="panel center">
     <h1>HELM</h1>
     <div class="stick-wrap">
-      <canvas id="stick" width="320" height="320"></canvas>
+      <div class="helm-wrap">
+        <img id="snap" alt="" src=""/>
+        <canvas id="stick" width="320" height="320"></canvas>
+      </div>
       <canvas id="zoom" width="50" height="320"></canvas>
     </div>
     <div class="axes">
@@ -354,6 +530,7 @@ const log = (msg, cls='') => {
 let connected = false;
 let cameras = [];
 let presets = [];
+let savedConfig = {};
 
 async function api(path, opts={}) {
   const r = await fetch(path, {
@@ -397,11 +574,98 @@ document.getElementById('btnConnect').onclick = async () => {
     const o = document.createElement('option'); o.textContent = '(no PTZ cameras found)';
     sel.appendChild(o);
   } else {
-    sel.onchange = () => { listPresets(); getPos(); };
-    listPresets(); getPos();
+    sel.onchange = () => { listPresets(); getPos(); refreshCameraInfo(); };
+    listPresets(); getPos(); refreshCameraInfo();
     setInterval(getPos, 2000);
   }
 };
+
+// ---------- snapshot preview (1 Hz poll behind the helm) ----------
+let snapTimer = null;
+let snapEnabled = false;
+function refreshSnap() {
+  if (!snapEnabled || !connected) return;
+  const id = document.getElementById('camSelect').value;
+  if (!id || id.startsWith('(')) return;
+  // Cache-buster: append timestamp
+  const img = document.getElementById('snap');
+  const ts = Date.now();
+  const probe = new Image();
+  probe.onload  = () => { img.src = probe.src; img.classList.add('live'); };
+  probe.onerror = () => { img.classList.remove('live'); };
+  probe.src = `/api/snapshot?id=${encodeURIComponent(id)}&t=${ts}`;
+}
+function setSnapEnabled(on) {
+  snapEnabled = on;
+  const btn = document.getElementById('btnSnap');
+  btn.textContent = on ? 'Hide preview' : 'Live preview';
+  btn.style.background = on ? 'var(--green)' : '';
+  btn.style.color      = on ? '#11111b' : '';
+  if (on) {
+    refreshSnap();
+    snapTimer = setInterval(refreshSnap, 1000);
+  } else {
+    clearInterval(snapTimer); snapTimer = null;
+    document.getElementById('snap').src = '';
+    document.getElementById('snap').classList.remove('live');
+  }
+}
+document.getElementById('btnSnap').onclick = () => setSnapEnabled(!snapEnabled);
+
+// ---------- camera-side controls ----------
+async function refreshCameraInfo() {
+  if (!connected) return;
+  const id = document.getElementById('camSelect').value;
+  if (!id || id.startsWith('(')) return;
+  const r = await api(`/api/camera?id=${encodeURIComponent(id)}`);
+  if (!r.ok) return;
+  document.getElementById('irMode').value = r.body.irLedMode || '';
+  // Per-camera local axis flips (loaded from saved config)
+  const cs = (savedConfig.cam_settings || {})[id] || {};
+  document.getElementById('invertX').checked = !!cs.invertX;
+  document.getElementById('invertY').checked = !!cs.invertY;
+  document.getElementById('invertZ').checked = !!cs.invertZ;
+  // Flashlight button enabled state
+  document.getElementById('btnFlash').disabled = !r.body.hasFlashlight;
+}
+
+document.getElementById('btnLocate').onclick = async () => {
+  const id = document.getElementById('camSelect').value;
+  if (!id || id.startsWith('(')) return;
+  log('-> locate', 'log-info');
+  const r = await api('/api/locate', { method: 'POST', body: { id } });
+  log(`<- ${r.status}`, r.ok ? 'log-ok' : 'log-err');
+};
+let flashOn = false;
+document.getElementById('btnFlash').onclick = async () => {
+  const id = document.getElementById('camSelect').value;
+  if (!id || id.startsWith('(')) return;
+  flashOn = !flashOn;
+  log(`-> flashlight ${flashOn ? 'on' : 'off'}`, 'log-info');
+  const r = await api('/api/flashlight', { method: 'POST', body: { id, enable: flashOn } });
+  log(`<- ${r.status}`, r.ok ? 'log-ok' : 'log-err');
+  document.getElementById('btnFlash').style.background = flashOn ? 'var(--yellow)' : '';
+  document.getElementById('btnFlash').style.color      = flashOn ? '#11111b' : '';
+};
+document.getElementById('irMode').onchange = async (e) => {
+  const id = document.getElementById('camSelect').value;
+  if (!id || id.startsWith('(') || !e.target.value) return;
+  log(`-> IR ${e.target.value}`, 'log-info');
+  const r = await api('/api/camera_patch', { method: 'POST', body: {
+    id, patch: { ispSettings: { irLedMode: e.target.value } }
+  } });
+  log(`<- ${r.status}`, r.ok ? 'log-ok' : 'log-err');
+};
+['invertX','invertY','invertZ'].forEach(name => {
+  document.getElementById(name).onchange = async (e) => {
+    const id = document.getElementById('camSelect').value;
+    if (!id || id.startsWith('(')) return;
+    const patch = {}; patch[name] = e.target.checked;
+    await api('/api/cam_settings', { method: 'POST', body: { id, patch } });
+    // Refresh local cache
+    savedConfig = (await (await fetch('/api/config')).json());
+  };
+});
 
 async function getPos() {
   if (!connected) return;
@@ -429,8 +693,34 @@ async function listPresets() {
     const b = document.createElement('button');
     b.className = 'preset';
     b.textContent = p ? `${i}: ${(p.name || '').slice(0,9)}` : `(${i})`;
-    if (!p) b.disabled = true;
-    b.onclick = () => goPreset(i);
+    b.disabled = false;  // always enabled for save-on-empty
+    b.onclick = (ev) => {
+      const id = document.getElementById('camSelect').value;
+      if (ev.shiftKey) {
+        const name = prompt(p ? `Rename preset ${i} to:` : `Save current position as preset ${i}. Name:`, p ? p.name : `slot${i}`);
+        if (name === null) return;
+        if (p) {
+          api('/api/rename_preset', { method: 'POST', body: { id, slot: i, name } }).then(r => {
+            log(`<- rename preset ${i}: ${r.status}`, r.ok ? 'log-ok' : 'log-err');
+            listPresets();
+          });
+        } else {
+          api('/api/save_preset', { method: 'POST', body: { id, name } }).then(r => {
+            log(`<- save preset: ${r.status}`, r.ok ? 'log-ok' : 'log-err');
+            listPresets();
+          });
+        }
+      } else if (ev.altKey && p) {
+        if (confirm(`Delete preset ${i} "${p.name}"?`)) {
+          api('/api/delete_preset', { method: 'POST', body: { id, slot: i } }).then(r => {
+            log(`<- delete preset ${i}: ${r.status}`, r.ok ? 'log-ok' : 'log-err');
+            listPresets();
+          });
+        }
+      } else if (p) {
+        goPreset(i);
+      }
+    };
     grid.appendChild(b);
   }
 }
@@ -525,7 +815,33 @@ zoom.addEventListener('pointermove', e => { if (zooming) setZoomFromEvent(e); })
 zoom.addEventListener('pointerup',   e => { zooming = false; stZ = 0; });
 zoom.addEventListener('pointercancel', e => { zooming = false; stZ = 0; });
 
-document.addEventListener('keydown', e => { if (e.key === 'Escape') panicStop(); });
+// Keyboard arrow-key nudges (relative move bumps)
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') { panicStop(); return; }
+  // Skip if typing in an input field
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+  if (!connected) return;
+  const id = document.getElementById('camSelect').value;
+  if (!id || id.startsWith('(')) return;
+  const big = e.shiftKey;
+  const step = big ? 600 : 200;
+  const speed = big ? 800 : 500;
+  let panPos = 0, tiltPos = 0, zoomPos = 0;
+  const fx = document.getElementById('invertX').checked ? -1 : 1;
+  const fy = document.getElementById('invertY').checked ? -1 : 1;
+  if (e.key === 'ArrowLeft')  panPos  = -step * fx;
+  else if (e.key === 'ArrowRight') panPos  =  step * fx;
+  else if (e.key === 'ArrowUp')    tiltPos = -step * fy;
+  else if (e.key === 'ArrowDown')  tiltPos =  step * fy;
+  else if (e.key === '+' || e.key === '=') zoomPos =  step;
+  else if (e.key === '-' || e.key === '_') zoomPos = -step;
+  else if (e.key === 'h' || e.key === 'H') { goPreset(0); return; }
+  else if ('123456789'.includes(e.key)) { goPreset(parseInt(e.key)); return; }
+  else return;
+  e.preventDefault();
+  api('/api/move', { method: 'POST', body: { id, payload: { type: 'relative',
+    payload: { panPos, tiltPos, zoomPos, panSpeed: speed, tiltSpeed: speed, zoomSpeed: speed, scale: 'normalized' } } } });
+});
 document.getElementById('btnStop').onclick = panicStop;
 async function panicStop() {
   stX = 0; stY = 0; stZ = 0; sticking = false; zooming = false;
@@ -617,6 +933,113 @@ function cycleCamera(dir) {
   log(`-> cam ${sel.options[idx].textContent}`, 'log-info');
 }
 
+// ---------- Move recorder + scene playback ----------
+let recording = false;
+let recStart = 0;
+let recFrames = [];        // [{t_ms, x, y, z}]
+let playing = false;
+let playTimers = [];
+
+function loadScenes() {
+  try { return JSON.parse(localStorage.getItem('helmsman.scenes') || '{}'); }
+  catch (e) { return {}; }
+}
+function saveScenes(s) { localStorage.setItem('helmsman.scenes', JSON.stringify(s)); }
+function refreshSceneList() {
+  const scenes = loadScenes();
+  const sel = document.getElementById('sceneSelect');
+  const cur = sel.value;
+  sel.innerHTML = '';
+  const names = Object.keys(scenes).sort();
+  if (names.length === 0) {
+    const o = document.createElement('option'); o.value = ''; o.textContent = '(no scenes)';
+    sel.appendChild(o);
+    document.getElementById('btnPlay').disabled = true;
+  } else {
+    for (const n of names) {
+      const o = document.createElement('option'); o.value = n;
+      o.textContent = `${n}  (${scenes[n].length}f, ${(scenes[n][scenes[n].length-1].t/1000).toFixed(1)}s)`;
+      sel.appendChild(o);
+    }
+    sel.value = cur && scenes[cur] ? cur : names[0];
+    document.getElementById('btnPlay').disabled = false;
+  }
+}
+
+document.getElementById('btnRec').onclick = () => {
+  if (recording) {
+    recording = false;
+    document.getElementById('btnRec').textContent = '● REC';
+    document.getElementById('btnRec').style.background = '';
+    document.getElementById('recBadge').style.display = 'none';
+    log(`Recorded ${recFrames.length} frames over ${((Date.now()-recStart)/1000).toFixed(1)}s`, 'log-ok');
+  } else {
+    recording = true;
+    recStart = Date.now();
+    recFrames = [];
+    document.getElementById('btnRec').textContent = '■ Stop';
+    document.getElementById('btnRec').style.background = 'var(--red)';
+    document.getElementById('btnRec').style.color = '#11111b';
+    document.getElementById('recBadge').style.display = '';
+    log('Recording…', 'log-info');
+  }
+};
+
+document.getElementById('btnSaveScene').onclick = () => {
+  if (recFrames.length === 0) { log('Nothing recorded yet', 'log-err'); return; }
+  const name = prompt('Scene name:', `scene-${Object.keys(loadScenes()).length+1}`);
+  if (!name) return;
+  const scenes = loadScenes();
+  scenes[name] = recFrames.map(f => ({...f}));  // deep copy
+  saveScenes(scenes);
+  refreshSceneList();
+  document.getElementById('sceneSelect').value = name;
+  log(`Saved scene "${name}"`, 'log-ok');
+};
+
+document.getElementById('btnDelScene').onclick = () => {
+  const sel = document.getElementById('sceneSelect');
+  const name = sel.value;
+  if (!name) return;
+  if (!confirm(`Delete scene "${name}"?`)) return;
+  const scenes = loadScenes(); delete scenes[name]; saveScenes(scenes);
+  refreshSceneList();
+  log(`Deleted scene "${name}"`, 'log-info');
+};
+
+document.getElementById('btnPlay').onclick = () => {
+  if (playing) {
+    playTimers.forEach(t => clearTimeout(t));
+    playTimers = [];
+    playing = false;
+    document.getElementById('btnPlay').textContent = '▶ Play';
+    panicStop();
+    return;
+  }
+  const name = document.getElementById('sceneSelect').value;
+  const scenes = loadScenes();
+  const frames = scenes[name];
+  if (!frames || frames.length === 0) return;
+  if (!connected) { log('Not connected', 'log-err'); return; }
+  const id = document.getElementById('camSelect').value;
+  if (!id || id.startsWith('(')) { log('Pick a camera first', 'log-err'); return; }
+  playing = true;
+  document.getElementById('btnPlay').textContent = '■ Stop';
+  log(`Playing "${name}" (${frames.length} frames)`, 'log-info');
+  for (const f of frames) {
+    playTimers.push(setTimeout(() => {
+      api('/api/move', { method: 'POST', body: { id, payload: { type: 'continuous', payload: { x: f.x, y: f.y, z: f.z } } } });
+    }, f.t));
+  }
+  // Final stop frame
+  playTimers.push(setTimeout(() => {
+    api('/api/move', { method: 'POST', body: { id, payload: { type: 'continuous', payload: { x: 0, y: 0, z: 0 } } } });
+    playing = false;
+    document.getElementById('btnPlay').textContent = '▶ Play';
+    log('Playback complete', 'log-ok');
+  }, frames[frames.length-1].t + 200));
+};
+
 let lastSent = { x:0, y:0, z:0 };
 let lastSentTime = 0;
 function tick() {
@@ -637,11 +1060,13 @@ function tick() {
   setBar('axX', x); setBar('axY', y); setBar('axZ', z);
 
   // Continuous coords are -1000..1000.
-  // Convention: stick up = camera looks up in the live image (image scrolls up,
-  // i.e. server +y, which is "tilt down" in degree terms but "view up" in PTZ-controller terms).
-  const sx = Math.round(x * 1000);
-  const sy = Math.round(y * 1000);
-  const sz = Math.round(z * 1000);
+  // Convention: stick up = camera looks up in the live image.
+  const fx = document.getElementById('invertX').checked ? -1 : 1;
+  const fy = document.getElementById('invertY').checked ? -1 : 1;
+  const fz = document.getElementById('invertZ').checked ? -1 : 1;
+  const sx = Math.round(x * 1000 * fx);
+  const sy = Math.round(y * 1000 * fy);
+  const sz = Math.round(z * 1000 * fz);
   document.getElementById('xVal').textContent = sx;
   document.getElementById('yVal').textContent = sy;
   document.getElementById('zVal').textContent = sz;
@@ -663,12 +1088,14 @@ function tick() {
     api('/api/move', { method: 'POST', body: { id, payload } });
     lastSent = { x: sx, y: sy, z: sz };
     lastSentTime = now;
+    if (recording) recFrames.push({ t: Date.now() - recStart, x: sx, y: sy, z: sz });
   } else if (!isMoving && wasMoving) {
     const payload = { type: 'continuous', payload: { x: 0, y: 0, z: 0 } };
     document.getElementById('lastCmd').textContent = JSON.stringify(payload, null, 2);
     api('/api/move', { method: 'POST', body: { id, payload } });
     lastSent = { x: 0, y: 0, z: 0 };
     lastSentTime = now;
+    if (recording) recFrames.push({ t: Date.now() - recStart, x: 0, y: 0, z: 0 });
   }
 }
 setInterval(tick, 30);
@@ -677,6 +1104,7 @@ drawStick(); drawZoom();
 // Prefill from server defaults (env vars + saved config)
 async function refreshConfig() {
   const c = await (await fetch('/api/config')).json();
+  savedConfig = c;
   if (c.nvr)  document.getElementById('nvrIp').value   = c.nvr;
   if (c.user) document.getElementById('nvrUser').value = c.user;
   if (c.pass) document.getElementById('nvrPass').value = c.pass;
@@ -684,6 +1112,7 @@ async function refreshConfig() {
   document.getElementById('forgetLink').style.display = c.saved ? '' : 'none';
 }
 refreshConfig();
+refreshSceneList();
 
 document.getElementById('forgetLink').addEventListener('click', async (e) => {
   e.preventDefault();
@@ -722,6 +1151,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
@@ -746,7 +1176,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if u.path == "/api/config":
             d = effective_defaults()
-            return self._json(200, {"nvr": d["ip"], "user": d["user"], "pass": d["pass"], "saved": d["saved"]})
+            return self._json(200, {
+                "nvr": d["ip"], "user": d["user"], "pass": d["pass"],
+                "saved": d["saved"], "cam_settings": d["cam_settings"],
+            })
         if u.path == "/api/position":
             cam = qs.get("id", [""])[0]
             code, j, txt = nvr.position(cam)
@@ -761,6 +1194,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 presets = [{"slot": p.get("slot", i+1), "name": p.get("name", f"slot{i+1}")} for i, p in enumerate(arr)]
                 return self._json(200, {"presets": presets})
             return self._json(code, {"error": txt[:300], "presets": []})
+        if u.path == "/api/snapshot":
+            if not nvr.connected:
+                return self._json(401, {"error": "not connected"})
+            cam = qs.get("id", [""])[0]
+            code, ctype, blob = nvr.snapshot(cam, hires=qs.get("hi", ["0"])[0] == "1")
+            if code == 200 and blob:
+                self.send_response(200)
+                self.send_header("Content-Type", ctype or "image/jpeg")
+                self.send_header("Content-Length", str(len(blob)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(blob)
+                return
+            return self._json(code or 502, {"error": "snapshot failed"})
+        if u.path == "/api/camera":
+            if not nvr.connected:
+                return self._json(401, {"error": "not connected"})
+            cam = qs.get("id", [""])[0]
+            code, j, txt = nvr.get_camera(cam)
+            if code == 200 and j is not None:
+                isp = j.get("ispSettings") or {}
+                fl  = (j.get("featureFlags") or {})
+                led = (j.get("ledSettings") or {})
+                return self._json(200, {
+                    "id": j.get("id"),
+                    "name": j.get("name"),
+                    "isFlippedHorizontal": isp.get("isFlippedHorizontal", False),
+                    "isFlippedVertical":   isp.get("isFlippedVertical", False),
+                    "irLedMode": isp.get("irLedMode", ""),  # "auto" | "on" | "off" | "autoFilterOnly"
+                    "ledStatus": led.get("isEnabled", False),
+                    "hasFlashlight": bool(fl.get("hasFlashlight") or fl.get("hasSpotlight")),
+                    "hasSpeaker":    bool(fl.get("hasSpeaker") or fl.get("speakerSettings")),
+                    "hasMic":        bool(fl.get("hasMic") or fl.get("mic")),
+                })
+            return self._json(code, {"error": txt[:300]})
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -783,11 +1251,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok, msg = nvr.login(user, pw)
             if not ok:
                 return self._json(401, {"error": msg})
-            if remember:
-                save_config({"ip": ip, "user": user, "pass": (pw if remember_pw else "")})
             code, b, txt = nvr.bootstrap()
             if code != 200 or not b:
                 return self._json(code, {"error": txt[:300]})
+            if remember:
+                cfg = {
+                    "ip": ip,
+                    "user": user,
+                    "save_password": bool(remember_pw),
+                    "cam_settings": load_config().get("cam_settings", {}),
+                }
+                if remember_pw:
+                    backend = store_password(user, pw)
+                    if backend == "file":
+                        cfg["pass"] = pw
+                save_config(cfg)
+            telegram_notify(f"Helmsman session started: {user}@{ip} ({len(b.get('cameras',[]))} cams)")
             cams = []
             for c in b.get("cameras", []):
                 ff = c.get("featureFlags") or {}
@@ -811,7 +1290,62 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 j = json.loads(txt)
             except Exception:
                 j = {"raw": txt[:300]}
+            # First non-zero move of the session triggers a Telegram notification (rate-limited).
+            try:
+                inner = (payload or {}).get("payload") or {}
+                if any(abs(inner.get(k, 0)) > 50 for k in ("x", "y", "z")):
+                    telegram_notify(f"Helmsman: PTZ command sent (cam={cam})")
+            except Exception:
+                pass
             return self._json(code, j)
+        if u.path == "/api/save_preset":
+            if not nvr.connected:
+                return self._json(401, {"error": "not connected"})
+            cam  = body.get("id")
+            name = (body.get("name") or "").strip()
+            code, txt = nvr.save_preset(cam, name)
+            try: j = json.loads(txt)
+            except: j = {"raw": txt[:300]}
+            return self._json(code, j)
+        if u.path == "/api/rename_preset":
+            if not nvr.connected:
+                return self._json(401, {"error": "not connected"})
+            cam  = body.get("id")
+            slot = int(body.get("slot", 1))
+            name = (body.get("name") or "").strip()
+            code, txt = nvr.rename_preset(cam, slot, name)
+            return self._json(code, {"raw": txt[:300]})
+        if u.path == "/api/delete_preset":
+            if not nvr.connected:
+                return self._json(401, {"error": "not connected"})
+            cam  = body.get("id")
+            slot = int(body.get("slot", 1))
+            code, txt = nvr.delete_preset(cam, slot)
+            return self._json(code, {"raw": txt[:300]})
+        if u.path == "/api/locate":
+            if not nvr.connected:
+                return self._json(401, {"error": "not connected"})
+            code, txt = nvr.locate(body.get("id"))
+            return self._json(code, {"raw": txt[:300]})
+        if u.path == "/api/flashlight":
+            if not nvr.connected:
+                return self._json(401, {"error": "not connected"})
+            code, txt = nvr.flashlight(body.get("id"), bool(body.get("enable")))
+            return self._json(code, {"raw": txt[:300]})
+        if u.path == "/api/camera_patch":
+            if not nvr.connected:
+                return self._json(401, {"error": "not connected"})
+            cam   = body.get("id")
+            patch = body.get("patch") or {}
+            code, txt = nvr.patch_camera(cam, patch)
+            try: j = json.loads(txt)
+            except: j = {"raw": txt[:300]}
+            return self._json(code, j)
+        if u.path == "/api/cam_settings":
+            cam = body.get("id")
+            patch = body.get("patch") or {}
+            cur = update_cam_settings(cam, patch)
+            return self._json(200, {"settings": cur})
         if u.path == "/api/preset":
             if not nvr.connected:
                 return self._json(401, {"error": "not connected"})

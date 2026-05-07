@@ -143,6 +143,37 @@ Even if everything else fails (browser crash, network drop, you trip over the ca
 
 ---
 
+## Live snapshot preview
+
+Click the **Live preview** button under the camera select. A 1 Hz JPEG poll starts and the image appears behind the helm at 85% opacity, so you can see what you're aiming at while you drive. Click again to hide.
+
+For higher-frequency feedback, drop the `Send rate` slider to 5 Hz so move commands don't compete for bandwidth with the snapshot.
+
+## Camera controls
+
+Three buttons + a dropdown:
+
+| Control | What it does |
+|---------|--------------|
+| **Locate (LED)** | Flashes the camera's status LEDs — handy for "which one is this in the rack/mount". |
+| **Flashlight** | Toggles the integrated white-light flashlight on cameras that have one. Greyed out otherwise. |
+| **IR night mode** | `auto`, `on`, `off`, `auto (filter only)`. Saved on the camera. |
+
+Below those: **invert X / Y / Z** checkboxes. Per-camera setting — useful when a camera is mounted upside-down or sideways and you want stick-up to mean "up in the world." Saved per-camera in `~/.helmsman/config.json`.
+
+## Keyboard shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Esc` | Panic stop |
+| `← → ↑ ↓` | Small relative bump (~200 steps) |
+| `Shift` + arrow | Bigger bump (~600 steps) |
+| `+ / -` | Zoom in / out one step |
+| `1`–`9` | Jump to preset slot |
+| `H` | Jump to home preset |
+
+These are **relative** moves (single bump, not continuous), so the camera stops automatically after each press.
+
 ## Presets
 
 Helmsman reads any presets you've already saved in the Protect web UI and shows them as buttons in the lower-left. Click one to jump.
@@ -151,7 +182,22 @@ Helmsman reads any presets you've already saved in the Protect web UI and shows 
 - Greyed-out buttons mean no preset exists for that slot.
 - The "Refresh presets" button in the Diagnostics panel re-pulls the list (useful if you just created one in the Protect UI).
 
-> Note: Helmsman does not (yet) create or delete presets from the UI. Use the Protect app for that. We may add inline preset save in a future version.
+- **Save current position** — `Shift`+click any empty preset slot. Helmsman prompts for a name, posts to the NVR, and refreshes the list.
+- **Rename** — `Shift`+click a filled slot.
+- **Delete** — `Alt`+click a filled slot. (Confirmation dialog first.)
+- **Refresh presets** — in the Diagnostics panel; re-pulls the list from the NVR.
+
+## Move recorder
+
+Capture a sequence of stick movements and replay it on demand. Useful for "sweep the property" routines without using the patrol API (which is rate-limited by the motor).
+
+1. Select a camera and click **● REC**. The button turns red and a `REC` badge appears.
+2. Drive the camera however you like — the bridge timestamps every move command sent.
+3. Click **■ Stop** to end recording.
+4. Click **Save** to name and store the scene (saved in browser localStorage, not on the NVR).
+5. Pick the scene from the dropdown and hit **▶ Play** to replay at the original timing.
+
+> Stored client-side only. Clearing the browser's storage erases scenes. To export, copy the `helmsman.scenes` key from `localStorage` (DevTools → Application → Local Storage).
 
 ---
 
@@ -192,9 +238,10 @@ The config file is created with `0600` permissions on POSIX. On Windows it lives
 
 A red **forget** link appears next to the checkboxes once anything is saved — click to wipe the file and clear the form.
 
-> **Security note:** A saved password is on disk in plaintext. Anyone with read access to your user profile can read it. If you don't want that, leave "save password" unchecked — Helmsman will still pre-fill IP + username so you only type the password each session.
->
-> A future release may use the OS keyring (Windows Credential Manager / macOS Keychain / libsecret) for stronger storage.
+> **Storage backend (v0.3+):**
+> - **OS keyring** is used when available — Windows Credential Manager on Windows, Keychain on macOS, libsecret/kwallet on Linux.
+> - **Plaintext fallback:** if the `keyring` library isn't installed (or is unavailable on a headless Linux without `libsecret`), Helmsman saves the password to the same `config.json` instead.
+> - **Either way**, anyone with read access to your user profile / Credential Manager can read it. The threat model is "convenience for trusted desktop user," not "secure password vault."
 
 ## Optional environment variables
 

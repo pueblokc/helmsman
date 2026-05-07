@@ -30,18 +30,28 @@ Spin up a single Python file, open the browser tab it pops, and drive any PTZ-ca
 
 ## Features
 
-- 🕹️ **Virtual joystick** with smooth velocity control (mouse + touch + pointer events)
-- 🎮 **USB joystick / gamepad** via browser GamepadAPI — Xbox, PlayStation, generic HID, no driver install
-- 🔍 **Separate zoom strip** for one-handed zooming while you pan/tilt
-- ⚡ **Continuous-move at 5–20 Hz** — proportional speed, snaps to stop on release
-- 🎯 **Preset jump** — auto-pulls saved presets, click or use gamepad face buttons
-- 🔐 **Saved credentials** — auto-connect on launch (opt-in)
-- 🛡️ **Server-side dead-man timer** — NVR auto-stops the camera if the bridge dies (~20 s)
-- ⌨️ **Panic stop** on `Esc`, gamepad Start, or the big red button
-- 📏 **Speed limit / deadzone / send rate** sliders for tuning feel and safety
+### Driving
+- 🕹️ **Virtual joystick** — mouse, touch, pointer events
+- 🎮 **USB joystick / gamepad** — Xbox / PS / generic HID via browser GamepadAPI
+- ⌨️ **Keyboard nudges** — arrow keys + `+/-`, `Shift` for bigger steps
+- 📺 **Live snapshot preview behind the helm** — see what you're aiming at
+- 🔍 **Separate zoom strip** for one-handed zoom
+
+### Cameras
+- 🎯 **Inline preset save / rename / delete** — `Shift`+click an empty slot to save here
+- 💡 **Camera controls** — locate, flashlight, IR night mode toggle
+- 🔄 **Per-camera axis flips** for upside-down mounts
+- 🎬 **Move recorder + scene replay** — record gestures, replay at original timing
+
+### Operations
+- 🔐 **Saved credentials** with OS keyring (Windows Cred Manager / Keychain / libsecret) — auto-connect on launch
+- 🛡️ **Server-side dead-man timer** — NVR auto-stops if the bridge dies
+- ⌨️ **Panic stop** on `Esc`, gamepad Start, or big red button
+- 📏 **Speed limit / deadzone / send rate** sliders
 - 📊 **Live position + payload log** — see exactly what's being sent
+- 📱 **Telegram notifications** (optional) on session start + first PTZ command
 - 🎨 **Catppuccin Mocha** theme, KCCS branded
-- 📦 **Single Python file** OR **one-click Windows `.exe`** (14 MB, no Python install needed)
+- 📦 **Single Python file** OR **one-click Windows `.exe`** (~14 MB)
 
 ---
 
@@ -128,18 +138,25 @@ Should also work with:
 
 ## Roadmap
 
-- [x] ~~Hardware joystick / gamepad support~~ (v0.2)
-- [x] ~~Saved credentials~~ (v0.2)
-- [x] ~~Multi-camera quick-switch~~ (v0.2 — gamepad shoulder buttons)
-- [x] ~~Native single-binary build~~ (v0.2 — Windows .exe)
-- [ ] Live MJPEG / snapshot preview from the camera (see what you're aiming)
-- [ ] Stream Deck integration for preset buttons
-- [ ] Inline preset save (currently view-only)
-- [ ] Per-camera axis-flip toggle (for upside-down mounts)
-- [ ] Move recorder — record stick gestures, replay as a patrol
-- [ ] OS keyring for password storage (Windows Cred Manager / macOS Keychain / libsecret)
-- [ ] Optional auth on the local UI
-- [ ] Spotlight / IR / talkback controls (G5 PTZ has the hardware)
+### Done
+- [x] Hardware joystick / gamepad (v0.2)
+- [x] Saved credentials with OS keyring (v0.2 + v0.3)
+- [x] Multi-camera quick-switch (v0.2)
+- [x] Native single-binary build (v0.2)
+- [x] Live snapshot preview (v0.3)
+- [x] Inline preset save / rename / delete (v0.3)
+- [x] Per-camera axis-flip toggle (v0.3)
+- [x] Move recorder + scene replay (v0.3)
+- [x] Spotlight / IR / locate controls (v0.3)
+- [x] Keyboard nudges (v0.3)
+- [x] Telegram notifications (v0.3)
+
+### Coming
+- [ ] Live H.264 / WebRTC stream behind the helm (vs current 1 Hz snapshot)
+- [ ] Stream Deck plugin
+- [ ] Optional auth on the local UI when bound to 0.0.0.0
+- [ ] Talkback (push-to-talk) — Protect WS protocol is non-trivial
+- [ ] Multi-camera grid view (drive any of N PTZs from one stick)
 
 ---
 

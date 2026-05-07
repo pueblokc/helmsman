@@ -9,8 +9,9 @@ venv/
 .vscode/
 *.log
 
-# screenshot driver — internal, not shipped
+# screenshot driver + smoke test — internal, not shipped
 assets/.screenshot.py
+.smoke-test.py
 
 # build artifacts
 dist/
