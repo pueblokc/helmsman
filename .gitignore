@@ -8,3 +8,6 @@ venv/
 .idea/
 .vscode/
 *.log
+
+# screenshot driver — internal, not shipped
+assets/.screenshot.py

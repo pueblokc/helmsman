@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" role="img" aria-label="Helmsman logo">
+  <defs>
+    <radialGradient id="hub" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#cba6f7"/>
+      <stop offset="60%" stop-color="#89b4fa"/>
+      <stop offset="100%" stop-color="#1e1e2e"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#89b4fa"/>
+      <stop offset="100%" stop-color="#cba6f7"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.5"/>
+    </filter>
+  </defs>
+
+  <!-- background tile (transparent for the SVG; bg only for embed contexts) -->
+  <rect width="240" height="240" fill="transparent"/>
+
+  <!-- 8 spoke handles (the wooden ones sticking out of a ship's wheel) -->
+  <g stroke="url(#rim)" stroke-width="10" stroke-linecap="round" fill="none" filter="url(#glow)" opacity="0.4">
+    <!-- inner glow under spokes -->
+    <line x1="120" y1="22"  x2="120" y2="58"/>
+    <line x1="120" y1="218" x2="120" y2="182"/>
+    <line x1="22"  y1="120" x2="58"  y2="120"/>
+    <line x1="218" y1="120" x2="182" y2="120"/>
+    <line x1="50"  y1="50"  x2="76"  y2="76"/>
+    <line x1="190" y1="190" x2="164" y2="164"/>
+    <line x1="190" y1="50"  x2="164" y2="76"/>
+    <line x1="50"  y1="190" x2="76"  y2="164"/>
+  </g>
+  <g stroke="url(#rim)" stroke-width="6" stroke-linecap="round" fill="none">
+    <line x1="120" y1="22"  x2="120" y2="58"/>
+    <line x1="120" y1="218" x2="120" y2="182"/>
+    <line x1="22"  y1="120" x2="58"  y2="120"/>
+    <line x1="218" y1="120" x2="182" y2="120"/>
+    <line x1="50"  y1="50"  x2="76"  y2="76"/>
+    <line x1="190" y1="190" x2="164" y2="164"/>
+    <line x1="190" y1="50"  x2="164" y2="76"/>
+    <line x1="50"  y1="190" x2="76"  y2="164"/>
+  </g>
+
+  <!-- outer rim (the wheel body) -->
+  <circle cx="120" cy="120" r="78" fill="none" stroke="url(#rim)" stroke-width="12"/>
+  <circle cx="120" cy="120" r="78" fill="none" stroke="#1e1e2e" stroke-width="2"/>
+
+  <!-- inner spokes from rim to hub (the X across the wheel) -->
+  <g stroke="#cba6f7" stroke-width="4" stroke-linecap="round">
+    <line x1="120" y1="58"  x2="120" y2="92"/>
+    <line x1="120" y1="148" x2="120" y2="182"/>
+    <line x1="58"  y1="120" x2="92"  y2="120"/>
+    <line x1="148" y1="120" x2="182" y2="120"/>
+  </g>
+
+  <!-- center hub: camera aperture iris (8 blades) -->
+  <g transform="translate(120 120)">
+    <circle r="36" fill="url(#hub)"/>
+    <circle r="36" fill="none" stroke="#cba6f7" stroke-width="2"/>
+    <!-- iris blades -->
+    <g fill="#11111b" opacity="0.85">
+      <polygon points="0,-26 22,-14 8,8"      transform="rotate(0)"/>
+      <polygon points="0,-26 22,-14 8,8"      transform="rotate(45)"/>
+      <polygon points="0,-26 22,-14 8,8"      transform="rotate(90)"/>
+      <polygon points="0,-26 22,-14 8,8"      transform="rotate(135)"/>
+      <polygon points="0,-26 22,-14 8,8"      transform="rotate(180)"/>
+      <polygon points="0,-26 22,-14 8,8"      transform="rotate(225)"/>
+      <polygon points="0,-26 22,-14 8,8"      transform="rotate(270)"/>
+      <polygon points="0,-26 22,-14 8,8"      transform="rotate(315)"/>
+    </g>
+    <!-- pupil -->
+    <circle r="9" fill="#11111b"/>
+    <circle r="9" fill="none" stroke="#89b4fa" stroke-width="1.5"/>
+    <!-- catch-light -->
+    <circle r="2.5" cx="-3" cy="-3" fill="#cdd6f4"/>
+  </g>
+</svg>

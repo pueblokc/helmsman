@@ -38,8 +38,9 @@ Other supported types (not used by this UI but the discriminator accepts them):
 © 2026 KCCS — kccsonline.com
 """
 from __future__ import annotations
-import http.server, json, os, socketserver, sys, threading, webbrowser
+import http.server, json, os, socketserver, stat, sys, threading, webbrowser
 import urllib.parse
+from pathlib import Path
 
 try:
     import requests
@@ -55,6 +56,46 @@ DEFAULT_USERNAME = os.environ.get("HELMSMAN_USER",   "")
 DEFAULT_PASSWORD = os.environ.get("HELMSMAN_PASS",   "")
 PORT             = int(os.environ.get("HELMSMAN_PORT", "8765"))
 BIND             = os.environ.get("HELMSMAN_BIND", "127.0.0.1")
+
+CONFIG_DIR  = Path(os.environ.get("HELMSMAN_CONFIG_DIR", str(Path.home() / ".helmsman")))
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+
+def load_config() -> dict:
+    """Read saved config from disk. Returns {} on miss."""
+    try:
+        return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_config(cfg: dict) -> None:
+    """Write config to disk with restrictive permissions."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    try:
+        # 0600 on POSIX. On Windows the file lives under the user profile already.
+        os.chmod(CONFIG_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except Exception:
+        pass
+
+
+def forget_config() -> None:
+    try:
+        CONFIG_FILE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def effective_defaults() -> dict:
+    """Env vars win over saved config (for explicit overrides at launch)."""
+    saved = load_config()
+    return {
+        "ip":   DEFAULT_NVR_IP   or saved.get("ip", ""),
+        "user": DEFAULT_USERNAME or saved.get("user", ""),
+        "pass": DEFAULT_PASSWORD or saved.get("pass", ""),
+        "saved": bool(saved.get("ip") or saved.get("user") or saved.get("pass")),
+    }
 
 
 class Nvr:
@@ -204,6 +245,15 @@ HTML = r"""<!doctype html>
     <input id="nvrUser" placeholder="local admin user"/>
     <label>Password</label>
     <input id="nvrPass" type="password" placeholder="••••••"/>
+    <div class="row" style="margin-top:10px;gap:14px;align-items:center;font-size:11px;color:var(--subtext)">
+      <label style="margin:0;display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="remember" style="width:auto" checked/> remember
+      </label>
+      <label style="margin:0;display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="rememberPass" style="width:auto"/> save password
+      </label>
+      <a href="#" id="forgetLink" style="display:none;color:var(--red);text-decoration:none;margin-left:auto">forget</a>
+    </div>
     <div style="margin-top:10px"></div>
     <button id="btnConnect">Connect &amp; Bootstrap</button>
 
@@ -291,7 +341,9 @@ document.getElementById('btnConnect').onclick = async () => {
   const pass = document.getElementById('nvrPass').value;
   if (!ip || !user || !pass) { log('Enter NVR IP, user, password', 'log-err'); return; }
   log(`Connecting to ${ip} as ${user}…`, 'log-info');
-  const r = await api('/api/connect', { method: 'POST', body: { ip, user, pass } });
+  const remember     = document.getElementById('remember').checked;
+  const rememberPass = document.getElementById('rememberPass').checked;
+  const r = await api('/api/connect', { method: 'POST', body: { ip, user, pass, remember, remember_password: rememberPass } });
   if (!r.ok) {
     log(`Connect failed: ${(r.body && r.body.error) || r.status}`, 'log-err');
     document.getElementById('connBadge').textContent = 'failed';
@@ -514,11 +566,38 @@ function tick() {
 setInterval(tick, 30);
 drawStick(); drawZoom();
 
-// Prefill from server defaults (env vars)
-fetch('/api/config').then(r => r.json()).then(c => {
+// Prefill from server defaults (env vars + saved config)
+async function refreshConfig() {
+  const c = await (await fetch('/api/config')).json();
   if (c.nvr)  document.getElementById('nvrIp').value   = c.nvr;
   if (c.user) document.getElementById('nvrUser').value = c.user;
   if (c.pass) document.getElementById('nvrPass').value = c.pass;
+  document.getElementById('rememberPass').checked = !!c.pass;
+  document.getElementById('forgetLink').style.display = c.saved ? '' : 'none';
+}
+refreshConfig();
+
+document.getElementById('forgetLink').addEventListener('click', async (e) => {
+  e.preventDefault();
+  if (!confirm('Forget saved NVR credentials?')) return;
+  await fetch('/api/forget', { method: 'POST' });
+  document.getElementById('nvrIp').value = '';
+  document.getElementById('nvrUser').value = '';
+  document.getElementById('nvrPass').value = '';
+  document.getElementById('rememberPass').checked = false;
+  document.getElementById('forgetLink').style.display = 'none';
+  log('Saved credentials forgotten', 'log-info');
+});
+
+// Auto-connect if we have saved creds (incl. password)
+window.addEventListener('load', () => {
+  setTimeout(async () => {
+    const c = await (await fetch('/api/config')).json();
+    if (c.nvr && c.user && c.pass) {
+      log('Auto-connecting from saved credentials…', 'log-info');
+      document.getElementById('btnConnect').click();
+    }
+  }, 250);
 });
 
 window.addEventListener('beforeunload', panicStop);
@@ -558,7 +637,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if u.path == "/api/config":
-            return self._json(200, {"nvr": DEFAULT_NVR_IP, "user": DEFAULT_USERNAME, "pass": DEFAULT_PASSWORD})
+            d = effective_defaults()
+            return self._json(200, {"nvr": d["ip"], "user": d["user"], "pass": d["pass"], "saved": d["saved"]})
         if u.path == "/api/position":
             cam = qs.get("id", [""])[0]
             code, j, txt = nvr.position(cam)
@@ -579,10 +659,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(u.query)
         body = self._read()
+        if u.path == "/api/forget":
+            forget_config()
+            return self._json(200, {"ok": True})
         if u.path == "/api/connect":
             ip   = (body.get("ip") or "").strip()
             user = (body.get("user") or "").strip()
             pw   = body.get("pass") or ""
+            remember     = bool(body.get("remember"))
+            remember_pw  = bool(body.get("remember_password"))
             if not (ip and user and pw):
                 return self._json(400, {"error": "ip, user, pass all required"})
             global nvr
@@ -590,6 +675,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ok, msg = nvr.login(user, pw)
             if not ok:
                 return self._json(401, {"error": msg})
+            if remember:
+                save_config({"ip": ip, "user": user, "pass": (pw if remember_pw else "")})
             code, b, txt = nvr.bootstrap()
             if code != 200 or not b:
                 return self._json(code, {"error": txt[:300]})
