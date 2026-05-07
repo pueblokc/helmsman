@@ -31,19 +31,27 @@ Spin up a single Python file, open the browser tab it pops, and drive any PTZ-ca
 ## Features
 
 - 🕹️ **Virtual joystick** with smooth velocity control (mouse + touch + pointer events)
+- 🎮 **USB joystick / gamepad** via browser GamepadAPI — Xbox, PlayStation, generic HID, no driver install
 - 🔍 **Separate zoom strip** for one-handed zooming while you pan/tilt
 - ⚡ **Continuous-move at 5–20 Hz** — proportional speed, snaps to stop on release
-- 🎯 **Preset jump** — auto-pulls saved presets, click to swing
+- 🎯 **Preset jump** — auto-pulls saved presets, click or use gamepad face buttons
+- 🔐 **Saved credentials** — auto-connect on launch (opt-in)
 - 🛡️ **Server-side dead-man timer** — NVR auto-stops the camera if the bridge dies (~20 s)
-- ⌨️ **Panic stop** on `Esc` and a big red button
+- ⌨️ **Panic stop** on `Esc`, gamepad Start, or the big red button
 - 📏 **Speed limit / deadzone / send rate** sliders for tuning feel and safety
 - 📊 **Live position + payload log** — see exactly what's being sent
 - 🎨 **Catppuccin Mocha** theme, KCCS branded
-- 📦 **Single Python file**, one dependency (`requests`), runs anywhere
+- 📦 **Single Python file** OR **one-click Windows `.exe`** (14 MB, no Python install needed)
 
 ---
 
 ## Run it
+
+### Easiest — Windows one-click
+
+Download `Helmsman.exe` from the [Releases](https://github.com/pueblokc/helmsman/releases) page and double-click. Browser pops, you type NVR IP / user / password, you're driving.
+
+### From source
 
 ```bash
 git clone https://github.com/pueblokc/helmsman.git
@@ -52,11 +60,16 @@ pip install -r requirements.txt
 python helmsman.py
 ```
 
-Browser opens to `http://127.0.0.1:8765`. Type your NVR IP, your local Protect username and password, click **Connect & Bootstrap**.
+### Build your own .exe
 
-Windows: double-click `run.bat`.
+```powershell
+pip install pyinstaller pillow
+powershell -ExecutionPolicy Bypass -File build/build.ps1
+```
 
-> 📖 **Read the [User Guide](docs/USERGUIDE.md)** for first-connect walkthrough, troubleshooting, security model, and FAQ.
+Browser opens to `http://127.0.0.1:8765`. Tick **remember** + **save password** to auto-connect on next launch.
+
+> 📖 **Read the [User Guide](docs/USERGUIDE.md)** for first-connect walkthrough, gamepad mapping, troubleshooting, security model, and FAQ.
 
 ---
 
@@ -115,13 +128,18 @@ Should also work with:
 
 ## Roadmap
 
-- [ ] Hardware joystick / gamepad support (XInput / DirectInput / HID)
+- [x] ~~Hardware joystick / gamepad support~~ (v0.2)
+- [x] ~~Saved credentials~~ (v0.2)
+- [x] ~~Multi-camera quick-switch~~ (v0.2 — gamepad shoulder buttons)
+- [x] ~~Native single-binary build~~ (v0.2 — Windows .exe)
+- [ ] Live MJPEG / snapshot preview from the camera (see what you're aiming)
 - [ ] Stream Deck integration for preset buttons
 - [ ] Inline preset save (currently view-only)
 - [ ] Per-camera axis-flip toggle (for upside-down mounts)
-- [ ] Multi-camera quick-switch
+- [ ] Move recorder — record stick gestures, replay as a patrol
+- [ ] OS keyring for password storage (Windows Cred Manager / macOS Keychain / libsecret)
 - [ ] Optional auth on the local UI
-- [ ] Native installer / single-binary build
+- [ ] Spotlight / IR / talkback controls (G5 PTZ has the hardware)
 
 ---
 

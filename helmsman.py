@@ -231,14 +231,44 @@ HTML = r"""<!doctype html>
   .key { display: inline-block; padding: 1px 6px; border: 1px solid var(--border);
     border-radius: 3px; font-size: 10px; background: var(--surface2); }
   pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .brand svg { flex: none; }
 </style>
 </head><body>
 
 <div class="layout">
 
   <div class="panel">
-    <h1>HELMSMAN</h1>
-    <div>NVR <span class="badge" id="connBadge">disconnected</span></div>
+    <div class="brand">
+      <svg viewBox="0 0 240 240" width="32" height="32" aria-hidden="true">
+        <defs>
+          <linearGradient id="brimg" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#89b4fa"/><stop offset="100%" stop-color="#cba6f7"/>
+          </linearGradient>
+          <radialGradient id="bhubg" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#cba6f7"/><stop offset="60%" stop-color="#89b4fa"/><stop offset="100%" stop-color="#1e1e2e"/>
+          </radialGradient>
+        </defs>
+        <g stroke="url(#brimg)" stroke-width="14" stroke-linecap="round" fill="none">
+          <line x1="120" y1="22" x2="120" y2="58"/><line x1="120" y1="218" x2="120" y2="182"/>
+          <line x1="22" y1="120" x2="58" y2="120"/><line x1="218" y1="120" x2="182" y2="120"/>
+          <line x1="50" y1="50" x2="76" y2="76"/><line x1="190" y1="190" x2="164" y2="164"/>
+          <line x1="190" y1="50" x2="164" y2="76"/><line x1="50" y1="190" x2="76" y2="164"/>
+        </g>
+        <circle cx="120" cy="120" r="78" fill="none" stroke="url(#brimg)" stroke-width="16"/>
+        <g stroke="#cba6f7" stroke-width="6" stroke-linecap="round">
+          <line x1="120" y1="58" x2="120" y2="92"/><line x1="120" y1="148" x2="120" y2="182"/>
+          <line x1="58" y1="120" x2="92" y2="120"/><line x1="148" y1="120" x2="182" y2="120"/>
+        </g>
+        <circle cx="120" cy="120" r="36" fill="url(#bhubg)"/>
+        <circle cx="120" cy="120" r="9" fill="#11111b"/>
+        <circle cx="120" cy="120" r="9" fill="none" stroke="#89b4fa" stroke-width="2"/>
+      </svg>
+      <h1 style="margin:0">HELMSMAN</h1>
+    </div>
+    <div style="margin-top:6px">NVR <span class="badge" id="connBadge">disconnected</span>
+      <span class="badge" id="padBadge" style="display:none">🎮 gamepad</span>
+    </div>
     <label>NVR IP / hostname</label>
     <input id="nvrIp" placeholder="192.168.x.x"/>
     <label>Username</label>
@@ -515,9 +545,87 @@ const labels = { speed: '%', dead: '%', rate: ' Hz' };
   });
 });
 
+// ---------- USB gamepad / joystick (via browser GamepadAPI) ----------
+let padIndex = null;
+let padName  = '';
+window.addEventListener('gamepadconnected', (e) => {
+  padIndex = e.gamepad.index;
+  padName  = e.gamepad.id;
+  log(`Gamepad connected: ${padName}`, 'log-ok');
+  const b = document.getElementById('padBadge');
+  b.textContent = '🎮 ' + padName.split('(')[0].trim().slice(0,20);
+  b.className = 'badge ok';
+  b.style.display = '';
+});
+window.addEventListener('gamepaddisconnected', (e) => {
+  if (e.gamepad.index === padIndex) {
+    log('Gamepad disconnected', 'log-info');
+    padIndex = null;
+    document.getElementById('padBadge').style.display = 'none';
+  }
+});
+
+let lastButtonStates = [];
+function readPad() {
+  // Returns {x, y, z, buttons:[bool,...], active:bool} normalized to -1..1
+  if (padIndex === null) return null;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  const p = pads[padIndex];
+  if (!p) return null;
+  // Standard mapping: axes[0]=LX, axes[1]=LY (down+), axes[2]=RX, axes[3]=RY
+  // triggers (LT/RT) are buttons[6] and [7] on most controllers, with .value 0..1
+  const lx = p.axes[0] || 0;
+  const ly = p.axes[1] || 0;
+  const rt = (p.buttons[7] && p.buttons[7].value) || 0;
+  const lt = (p.buttons[6] && p.buttons[6].value) || 0;
+  const x = lx;
+  const y = -ly;            // gamepad LY+ = down -> flip so up = +y on stick
+  const z = rt - lt;        // RT zoom in, LT zoom out
+  const active = Math.abs(x) > 0.05 || Math.abs(y) > 0.05 || Math.abs(z) > 0.05;
+  // capture button presses (rising edge)
+  const btns = p.buttons.map(b => !!b.pressed);
+  const events = [];
+  for (let i = 0; i < btns.length; i++) {
+    if (btns[i] && !lastButtonStates[i]) events.push(i);
+  }
+  lastButtonStates = btns;
+  return { x, y, z, active, events };
+}
+
+function handlePadButtons(events) {
+  // Standard gamepad button layout (Xbox-style):
+  //  0 = A      1 = B       2 = X       3 = Y
+  //  4 = LB     5 = RB      6 = LT(*)   7 = RT(*)
+  //  8 = Back   9 = Start  10 = LStick 11 = RStick
+  // 12 = D-Up  13 = D-Down 14 = D-L    15 = D-R
+  for (const i of events) {
+    if (i >= 0 && i <= 3)              goPreset(i + 1);                      // A/B/X/Y -> presets 1-4
+    else if (i === 12) goPreset(5);    else if (i === 13) goPreset(6);
+    else if (i === 14) goPreset(7);    else if (i === 15) goPreset(8);
+    else if (i === 9)  panicStop();                                          // Start = panic
+    else if (i === 4 || i === 5) cycleCamera(i === 5 ? 1 : -1);              // LB/RB switch cam
+  }
+}
+
+function cycleCamera(dir) {
+  const sel = document.getElementById('camSelect');
+  if (sel.options.length === 0 || sel.options[0].value === '') return;
+  const n = sel.options.length;
+  let idx = (sel.selectedIndex + dir + n) % n;
+  sel.selectedIndex = idx;
+  sel.dispatchEvent(new Event('change'));
+  log(`-> cam ${sel.options[idx].textContent}`, 'log-info');
+}
+
 let lastSent = { x:0, y:0, z:0 };
 let lastSentTime = 0;
 function tick() {
+  // Gamepad input overrides on-screen stick whenever it's deflected.
+  const pad = readPad();
+  if (pad) {
+    if (pad.events.length) handlePadButtons(pad.events);
+    if (pad.active) { stX = pad.x; stY = pad.y; stZ = pad.z; }
+  }
   const xa = applyDead(stX), ya = applyDead(stY), za = applyDead(stZ);
   const sp = parseInt(document.getElementById('speed').value)/100;
   const x = xa * sp, y = ya * sp, z = za * sp;

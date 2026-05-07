@@ -11,3 +11,10 @@ venv/
 
 # screenshot driver — internal, not shipped
 assets/.screenshot.py
+
+# build artifacts
+dist/
+build/_pyi-work/
+build/*.spec
+build/helmsman.ico
+.helmsman-test*/

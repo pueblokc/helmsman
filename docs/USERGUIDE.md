@@ -41,6 +41,12 @@ You do not need:
 
 ## Install
 
+### Option A — Windows one-click
+
+Grab `Helmsman.exe` from the [Releases page](https://github.com/pueblokc/helmsman/releases) and double-click. No Python install required.
+
+### Option B — From source (any OS)
+
 ```bash
 git clone https://github.com/pueblokc/helmsman.git
 cd helmsman
@@ -48,7 +54,15 @@ pip install -r requirements.txt
 python helmsman.py
 ```
 
-On Windows you can double-click `run.bat` instead of typing the last command.
+On Windows from source you can double-click `run.bat` instead of typing the last command.
+
+### Option C — Build your own .exe
+
+```powershell
+pip install pyinstaller pillow
+powershell -ExecutionPolicy Bypass -File build/build.ps1
+# -> dist/Helmsman.exe (~14 MB)
+```
 
 The console prints:
 
@@ -96,6 +110,26 @@ The whole UI keeps you informed:
 - Bars under the helm show real-time `x / y / z` values being sent (range -1000..1000)
 - The **LAST MOVE COMMAND** panel shows the exact JSON payload posted to the NVR
 - The **LOG** panel logs every API call with status code
+
+### USB joystick / gamepad
+
+Plug in any standard HID gamepad (Xbox, PlayStation, generic, flight stick, etc.) **before or while Helmsman is open**. Press any button on it once — browsers won't expose a gamepad until you've interacted with it. A `🎮` badge then appears next to the NVR status.
+
+Default mapping (Xbox-style controllers):
+
+| Input | Action |
+|-------|--------|
+| Left stick X / Y | pan / tilt (overrides on-screen helm when deflected) |
+| Right trigger (RT) | zoom in |
+| Left trigger (LT) | zoom out |
+| A / B / X / Y | preset 1 / 2 / 3 / 4 |
+| D-pad ↑ / ↓ / ← / → | preset 5 / 6 / 7 / 8 |
+| LB / RB | previous / next camera |
+| Start | panic stop |
+
+Gamepad input takes over whenever any axis exceeds 5% of full deflection — release the stick and the on-screen helm regains control. The same speed-limit / deadzone / send-rate sliders apply.
+
+> Most browsers (Chrome, Edge, Firefox) support GamepadAPI natively. Safari requires HTTPS in some configurations.
 
 ### Stopping
 
@@ -147,6 +181,21 @@ The **LOG** panel on the right shows everything: connection attempts, every pres
 
 ---
 
+## Saved credentials
+
+Below the password field there are two checkboxes:
+
+- **remember** — saves NVR IP + username to `~/.helmsman/config.json` after a successful connect, so the next launch pre-fills them. (No password yet.)
+- **save password** — also stores the password in the same file. Helmsman then **auto-connects** on next launch — you skip the form entirely.
+
+The config file is created with `0600` permissions on POSIX. On Windows it lives under `%USERPROFILE%\.helmsman\config.json`, inside your user profile.
+
+A red **forget** link appears next to the checkboxes once anything is saved — click to wipe the file and clear the form.
+
+> **Security note:** A saved password is on disk in plaintext. Anyone with read access to your user profile can read it. If you don't want that, leave "save password" unchecked — Helmsman will still pre-fill IP + username so you only type the password each session.
+>
+> A future release may use the OS keyring (Windows Credential Manager / macOS Keychain / libsecret) for stronger storage.
+
 ## Optional environment variables
 
 For unattended startup, lab setups, or kiosks, you can pre-fill the form via env vars:
@@ -188,8 +237,13 @@ If the NVR rejects this, check the error response — it usually tells you exact
 - **Stick up = camera looks down (or vice versa)** → some PTZ controllers use the inverse convention. Edit `helmsman.py`, find the `sy =` line in the `tick()` function, flip the sign.
 - **Camera mounted upside down** → check `featureFlags.isFlippedVertical` and `isFlippedHorizontal` in the bootstrap response. Helmsman does not currently auto-correct for these — flip the relevant axis manually.
 
-### Helm doesn't respond to my real joystick / gamepad
-This release uses an on-screen virtual joystick. Hardware joystick / gamepad / Stream Deck input is on the roadmap but not in v0.1.
+### My USB joystick / gamepad isn't being detected
+Helmsman uses the browser's GamepadAPI. Plug in your controller, then **press any button on it** — most browsers don't expose a gamepad until you've interacted with it. Once detected, a 🎮 badge appears next to the connection status.
+
+If your stick isn't recognized at all, check it works at https://hardwaretester.com/gamepad first.
+
+### Stream Deck / macro keyboard
+Stream Deck integration is on the roadmap. For now you can use Stream Deck's "Open URL" or "System: Hotkey" actions to send `Esc` (panic stop) or open the Helmsman URL.
 
 ### Browser tab opens but page is blank
 Most likely you have an old cached version after an update. Hard refresh with `Ctrl-Shift-R` (Win/Linux) or `Cmd-Shift-R` (macOS).
