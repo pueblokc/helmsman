@@ -476,9 +476,11 @@ function tick() {
   };
   setBar('axX', x); setBar('axY', y); setBar('axZ', z);
 
-  // Continuous coords are -1000..1000. Server +y = down → invert stick y.
+  // Continuous coords are -1000..1000.
+  // Convention: stick up = camera looks up in the live image (image scrolls up,
+  // i.e. server +y, which is "tilt down" in degree terms but "view up" in PTZ-controller terms).
   const sx = Math.round(x * 1000);
-  const sy = Math.round(-y * 1000);
+  const sy = Math.round(y * 1000);
   const sz = Math.round(z * 1000);
   document.getElementById('xVal').textContent = sx;
   document.getElementById('yVal').textContent = sy;
