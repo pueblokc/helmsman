@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <defs>
+    <linearGradient id="g_helmsman" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4fe25a"/>
+      <stop offset="1" stop-color="#17be56"/>
+    </linearGradient>
+    <linearGradient id="gloss_helmsman" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="94" height="94" rx="22" fill="url(#g_helmsman)"/>
+  <rect x="3" y="3" width="94" height="47" rx="22" fill="url(#gloss_helmsman)"/>
+  <g transform="translate(21.80,21.80) scale(2.35)">
+    <circle cx="12" cy="12" r="9" fill="none" stroke="#fff" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round"/><polygon points="15.5,8.5 11,11 8.5,15.5 13,13" stroke="#fff" stroke-width="2.0" stroke-linecap="round" stroke-linejoin="round" fill="#fff"/>
+  </g>
+</svg>
