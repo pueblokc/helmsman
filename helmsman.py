@@ -38,7 +38,7 @@ Other supported types (not used by this UI but the discriminator accepts them):
 © 2026 KCCS — kccsonline.com
 """
 from __future__ import annotations
-import http.server, json, os, socketserver, stat, sys, threading, webbrowser
+import http.server, ipaddress, json, os, re, socketserver, stat, sys, tempfile, threading, webbrowser
 import urllib.parse
 from pathlib import Path
 
@@ -70,6 +70,69 @@ BIND             = os.environ.get("HELMSMAN_BIND", "127.0.0.1")
 CONFIG_DIR  = Path(os.environ.get("HELMSMAN_CONFIG_DIR", str(Path.home() / ".helmsman")))
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
+# Extra Host-header names the local UI will answer to (comma-separated), e.g. a
+# reverse-proxy hostname. IP literals and "localhost" are always accepted.
+ALLOWED_HOSTS = {h.strip().lower() for h in os.environ.get("HELMSMAN_ALLOWED_HOSTS", "").split(",") if h.strip()}
+
+MAX_BODY_BYTES = 1 << 20
+
+# Serialises read-modify-write of config.json across request threads.
+_config_lock = threading.RLock()
+
+# Protect object IDs are 24-char hex; allow a slightly wider safe charset but never
+# anything that could change the URL path ("/", "..", "?", "#", "%").
+_CAM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# NVR address: hostname / IPv4 / [IPv6], optional :port. No scheme, path, userinfo.
+_NVR_HOST_RE = re.compile(r"^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]{1,253})(:[0-9]{1,5})?$")
+
+IR_LED_MODES = {"auto", "on", "off", "autoFilterOnly"}
+
+
+def valid_cam_id(cam) -> bool:
+    return isinstance(cam, str) and bool(_CAM_ID_RE.match(cam))
+
+
+def valid_nvr_host(ip) -> bool:
+    return isinstance(ip, str) and bool(_NVR_HOST_RE.match(ip))
+
+
+def _split_host(value: str) -> str:
+    """Strip an optional :port from a Host/Origin authority and lowercase it."""
+    value = value.strip().lower()
+    if value.startswith("["):
+        return value[1:value.find("]")] if "]" in value else value
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+def host_allowed(host_header: str) -> bool:
+    """Reject DNS-rebinding: only answer to IP literals, localhost, or configured names."""
+    if not host_header:
+        return False
+    host = _split_host(host_header)
+    if host in ("localhost",) or host in ALLOWED_HOSTS:
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def origin_allowed(origin: str, host_header: str) -> bool:
+    """CSRF guard for state-changing requests: browser Origin must match our Host."""
+    if not origin:
+        return True  # non-browser client (curl, scripts) — browsers always send Origin on POST
+    try:
+        o = urllib.parse.urlparse(origin)
+    except ValueError:
+        return False
+    if o.scheme not in ("http", "https"):
+        return False
+    if host_header and o.netloc.lower() == host_header.strip().lower():
+        return True
+    # Behind a reverse proxy that rewrites Host, allow its public name explicitly.
+    return (o.hostname or "").lower() in ALLOWED_HOSTS
+
 
 def load_config() -> dict:
     """Read saved config from disk. Returns {} on miss."""
@@ -80,28 +143,43 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
-    """Write config to disk with restrictive permissions."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    try:
-        os.chmod(CONFIG_FILE, stat.S_IRUSR | stat.S_IWUSR)
-    except Exception:
-        pass
+    """Atomically write config to disk, created 0600 so the password is never world-readable."""
+    with _config_lock:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=str(CONFIG_FILE.parent))
+        try:
+            try:
+                os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+            except Exception:
+                pass
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(cfg, indent=2))
+            os.replace(tmp, CONFIG_FILE)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+
+def delete_password(user: str) -> None:
+    if HAVE_KEYRING and user:
+        try:
+            _keyring.delete_password(KEYRING_SERVICE, user)
+        except Exception:
+            pass
 
 
 def forget_config() -> None:
-    try:
-        CONFIG_FILE.unlink()
-    except FileNotFoundError:
-        pass
-    if HAVE_KEYRING:
+    with _config_lock:
+        # Read the saved user BEFORE deleting the file, otherwise the keyring entry is orphaned.
+        user = load_config().get("user")
         try:
-            cfg = load_config()
-            user = cfg.get("user")
-            if user:
-                _keyring.delete_password(KEYRING_SERVICE, user)
-        except Exception:
+            CONFIG_FILE.unlink()
+        except FileNotFoundError:
             pass
+        delete_password(user)
 
 
 def store_password(user: str, pw: str) -> str:
@@ -143,14 +221,19 @@ def effective_defaults() -> dict:
     }
 
 
+CAM_SETTING_KEYS = ("invertX", "invertY", "invertZ")
+
+
 def update_cam_settings(cam_id: str, patch: dict) -> dict:
-    cfg = load_config()
-    cs = cfg.setdefault("cam_settings", {})
-    cur = cs.get(cam_id, {})
-    cur.update(patch)
-    cs[cam_id] = cur
-    save_config(cfg)
-    return cur
+    clean = {k: bool(v) for k, v in patch.items() if k in CAM_SETTING_KEYS}
+    with _config_lock:
+        cfg = load_config()
+        cs = cfg.setdefault("cam_settings", {})
+        cur = cs.get(cam_id, {})
+        cur.update(clean)
+        cs[cam_id] = cur
+        save_config(cfg)
+        return cur
 
 
 class Nvr:
@@ -160,6 +243,13 @@ class Nvr:
         self.s.verify = False
         self.csrf = ""
         self.connected = False
+
+    def close(self) -> None:
+        self.connected = False
+        try:
+            self.s.close()
+        except Exception:
+            pass
 
     def login(self, user: str, pw: str) -> tuple[bool, str]:
         try:
@@ -461,7 +551,7 @@ HTML = r"""<!doctype html>
     <h2>Presets <span class="badge" id="presetCount">—</span></h2>
     <div id="presetGrid" class="grid3"></div>
     <div style="font-size:10px;color:var(--subtext);margin-top:6px">
-      <span class="key">Shift</span>+click empty = save here · <span class="key">Alt</span>+click = delete
+      <span class="key">Shift</span>+click empty = save new · <span class="key">Shift</span>+click saved = rename · <span class="key">Alt</span>+click = delete
     </div>
 
     <h2>Recorder <span class="badge" id="recBadge" style="display:none">REC</span></h2>
@@ -528,16 +618,24 @@ const log = (msg, cls='') => {
 };
 
 let connected = false;
+let posTimer = null;
 let cameras = [];
 let presets = [];
 let savedConfig = {};
 
 async function api(path, opts={}) {
-  const r = await fetch(path, {
-    method: opts.method || 'GET',
-    headers: { 'Content-Type': 'application/json' },
-    body: opts.body ? JSON.stringify(opts.body) : undefined
-  });
+  let r;
+  try {
+    r = await fetch(path, {
+      method: opts.method || 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+      keepalive: !!opts.keepalive
+    });
+  } catch (e) {
+    // Helmsman process gone / network error: report instead of an unhandled rejection.
+    return { ok: false, status: 0, body: { error: 'helmsman unreachable' } };
+  }
   let j = null; try { j = await r.json(); } catch(e) {}
   return { ok: r.ok, status: r.status, body: j };
 }
@@ -560,7 +658,7 @@ document.getElementById('btnConnect').onclick = async () => {
   connected = true;
   document.getElementById('connBadge').textContent = 'connected';
   document.getElementById('connBadge').className = 'badge ok';
-  cameras = r.body.cameras;
+  cameras = (r.body && r.body.cameras) || [];
   const ptzCount = cameras.filter(c=>c.ptz).length;
   log(`Connected. Cameras: ${cameras.length} (PTZ: ${ptzCount})`, 'log-ok');
   const sel = document.getElementById('camSelect');
@@ -576,7 +674,9 @@ document.getElementById('btnConnect').onclick = async () => {
   } else {
     sel.onchange = () => { listPresets(); getPos(); refreshCameraInfo(); };
     listPresets(); getPos(); refreshCameraInfo();
-    setInterval(getPos, 2000);
+    // Reconnecting used to stack another 2 s poller each time.
+    if (posTimer) clearInterval(posTimer);
+    posTimer = setInterval(getPos, 2000);
   }
 };
 
@@ -697,7 +797,8 @@ async function listPresets() {
     b.onclick = (ev) => {
       const id = document.getElementById('camSelect').value;
       if (ev.shiftKey) {
-        const name = prompt(p ? `Rename preset ${i} to:` : `Save current position as preset ${i}. Name:`, p ? p.name : `slot${i}`);
+        // Protect assigns the slot for new presets (next free one), so we can't promise slot i.
+        const name = prompt(p ? `Rename preset ${i} to:` : `Save current position as a new preset. Name:`, p ? p.name : `slot${i}`);
         if (name === null) return;
         if (p) {
           api('/api/rename_preset', { method: 'POST', body: { id, slot: i, name } }).then(r => {
@@ -829,13 +930,14 @@ document.addEventListener('keydown', e => {
   let panPos = 0, tiltPos = 0, zoomPos = 0;
   const fx = document.getElementById('invertX').checked ? -1 : 1;
   const fy = document.getElementById('invertY').checked ? -1 : 1;
+  const fz = document.getElementById('invertZ').checked ? -1 : 1;
   if (e.key === 'ArrowLeft')  panPos  = -step * fx;
   else if (e.key === 'ArrowRight') panPos  =  step * fx;
   else if (e.key === 'ArrowUp')    tiltPos = -step * fy;
   else if (e.key === 'ArrowDown')  tiltPos =  step * fy;
-  else if (e.key === '+' || e.key === '=') zoomPos =  step;
-  else if (e.key === '-' || e.key === '_') zoomPos = -step;
-  else if (e.key === 'h' || e.key === 'H') { goPreset(0); return; }
+  else if (e.key === '+' || e.key === '=') zoomPos =  step * fz;
+  else if (e.key === '-' || e.key === '_') zoomPos = -step * fz;
+  else if (e.key === 'h' || e.key === 'H') { goPreset(-1); return; }   // PTZ_PRESET_HOME_SLOT = -1
   else if ('123456789'.includes(e.key)) { goPreset(parseInt(e.key)); return; }
   else return;
   e.preventDefault();
@@ -844,12 +946,13 @@ document.addEventListener('keydown', e => {
 });
 document.getElementById('btnStop').onclick = panicStop;
 async function panicStop() {
-  stX = 0; stY = 0; stZ = 0; sticking = false; zooming = false;
+  stX = 0; stY = 0; stZ = 0; sticking = false; zooming = false; padDriving = false;
   log('PANIC STOP', 'log-err');
   if (!connected) return;
   const id = document.getElementById('camSelect').value;
   if (id && !id.startsWith('(')) {
-    await api('/api/move', { method: 'POST',
+    // keepalive lets the stop survive the page being closed (beforeunload).
+    await api('/api/move', { method: 'POST', keepalive: true,
       body: { id, payload: { type: 'continuous', payload: { x: 0, y: 0, z: 0 } } } });
   }
 }
@@ -877,11 +980,13 @@ window.addEventListener('gamepaddisconnected', (e) => {
   if (e.gamepad.index === padIndex) {
     log('Gamepad disconnected', 'log-info');
     padIndex = null;
+    if (padDriving) { padDriving = false; if (!sticking) { stX = 0; stY = 0; } if (!zooming) stZ = 0; }
     document.getElementById('padBadge').style.display = 'none';
   }
 });
 
 let lastButtonStates = [];
+let padDriving = false;
 function readPad() {
   // Returns {x, y, z, buttons:[bool,...], active:bool} normalized to -1..1
   if (padIndex === null) return null;
@@ -950,7 +1055,7 @@ function refreshSceneList() {
   const sel = document.getElementById('sceneSelect');
   const cur = sel.value;
   sel.innerHTML = '';
-  const names = Object.keys(scenes).sort();
+  const names = Object.keys(scenes).filter(n => Array.isArray(scenes[n]) && scenes[n].length).sort();
   if (names.length === 0) {
     const o = document.createElement('option'); o.value = ''; o.textContent = '(no scenes)';
     sel.appendChild(o);
@@ -971,6 +1076,7 @@ document.getElementById('btnRec').onclick = () => {
     recording = false;
     document.getElementById('btnRec').textContent = '● REC';
     document.getElementById('btnRec').style.background = '';
+    document.getElementById('btnRec').style.color = '';
     document.getElementById('recBadge').style.display = 'none';
     log(`Recorded ${recFrames.length} frames over ${((Date.now()-recStart)/1000).toFixed(1)}s`, 'log-ok');
   } else {
@@ -1042,12 +1148,19 @@ document.getElementById('btnPlay').onclick = () => {
 
 let lastSent = { x:0, y:0, z:0 };
 let lastSentTime = 0;
+let lastSentCam = null;
 function tick() {
   // Gamepad input overrides on-screen stick whenever it's deflected.
   const pad = readPad();
   if (pad) {
     if (pad.events.length) handlePadButtons(pad.events);
-    if (pad.active) { stX = pad.x; stY = pad.y; stZ = pad.z; }
+    if (pad.active) { stX = pad.x; stY = pad.y; stZ = pad.z; padDriving = true; }
+    else if (padDriving) {
+      // Stick released: the last sampled deflection must not latch (camera kept moving).
+      padDriving = false;
+      if (!sticking) { stX = 0; stY = 0; }
+      if (!zooming) stZ = 0;
+    }
   }
   const xa = applyDead(stX), ya = applyDead(stY), za = applyDead(stZ);
   const sp = parseInt(document.getElementById('speed').value)/100;
@@ -1075,6 +1188,16 @@ function tick() {
   if (!connected) return;
   const id = document.getElementById('camSelect').value;
   if (!id || id.startsWith('(')) return;
+
+  // Camera switched while moving: stop the previous camera, otherwise it keeps
+  // drifting until Protect's ~20 s dead-man timer fires.
+  if (lastSentCam && lastSentCam !== id && (lastSent.x || lastSent.y || lastSent.z)) {
+    api('/api/move', { method: 'POST',
+      body: { id: lastSentCam, payload: { type: 'continuous', payload: { x: 0, y: 0, z: 0 } } } });
+    lastSent = { x: 0, y: 0, z: 0 };
+    lastSentTime = 0;
+  }
+  lastSentCam = id;
 
   const isMoving = (sx !== 0 || sy !== 0 || sz !== 0);
   const wasMoving = (lastSent.x !== 0 || lastSent.y !== 0 || lastSent.z !== 0);
@@ -1143,6 +1266,23 @@ window.addEventListener('beforeunload', panicStop);
 """
 
 
+def _parse_json(txt: str):
+    try:
+        return json.loads(txt)
+    except Exception:
+        return {"raw": (txt or "")[:300]}
+
+
+def _parse_slot(value):
+    """Preset slot as int (-1 = home). Raises ValueError on junk."""
+    if isinstance(value, bool):
+        raise ValueError("bad slot")
+    slot = int(value)
+    if slot < -1 or slot > 1000:
+        raise ValueError("bad slot")
+    return slot
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a, **kw): pass
 
@@ -1151,19 +1291,61 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
     def _read(self):
-        n = int(self.headers.get("Content-Length", "0") or 0)
-        if not n: return {}
         try:
-            return json.loads(self.rfile.read(n).decode("utf-8"))
+            n = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            return {}
+        if n <= 0 or n > MAX_BODY_BYTES:
+            return {}
+        try:
+            j = json.loads(self.rfile.read(n).decode("utf-8"))
         except Exception:
             return {}
+        return j if isinstance(j, dict) else {}
+
+    def _guard(self, state_changing: bool) -> bool:
+        """DNS-rebinding + CSRF protection. Returns False (and responds 403) when rejected."""
+        host = self.headers.get("Host", "")
+        if not host_allowed(host):
+            self._json(403, {"error": "host not allowed (set HELMSMAN_ALLOWED_HOSTS)"})
+            return False
+        if state_changing and not origin_allowed(self.headers.get("Origin", ""), host):
+            self._json(403, {"error": "cross-origin request rejected"})
+            return False
+        return True
+
+    def _dispatch(self, route, state_changing: bool):
+        if not self._guard(state_changing):
+            return
+        try:
+            route()
+        except requests.RequestException as e:
+            self._json(502, {"error": f"NVR request failed: {type(e).__name__}"})
+        except Exception as e:  # never drop the socket without a response
+            self._json(500, {"error": f"internal error: {type(e).__name__}"})
 
     def do_GET(self):
+        self._dispatch(self._get, state_changing=False)
+
+    def do_POST(self):
+        self._dispatch(self._post, state_changing=True)
+
+    def _need_cam(self, cam):
+        """Returns an error tuple if not connected / bad camera id, else None."""
+        if not nvr.connected:
+            return 401, {"error": "not connected"}
+        if not valid_cam_id(cam):
+            return 400, {"error": "bad camera id"}
+        return None
+
+    def _get(self):
         u = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(u.query)
         if u.path in ("/", "/index.html"):
@@ -1171,6 +1353,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
             self.wfile.write(body)
             return
@@ -1180,40 +1366,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "nvr": d["ip"], "user": d["user"], "pass": d["pass"],
                 "saved": d["saved"], "cam_settings": d["cam_settings"],
             })
+        cam = qs.get("id", [""])[0]
         if u.path == "/api/position":
-            cam = qs.get("id", [""])[0]
+            err = self._need_cam(cam)
+            if err:
+                return self._json(*err)
             code, j, txt = nvr.position(cam)
             if code == 200 and j is not None:
                 return self._json(200, j)
-            return self._json(code, {"error": txt[:300]})
+            return self._json(code if code != 200 else 502, {"error": txt[:300]})
         if u.path == "/api/presets":
-            cam = qs.get("id", [""])[0]
+            err = self._need_cam(cam)
+            if err:
+                return self._json(err[0], {**err[1], "presets": []})
             code, j, txt = nvr.list_presets(cam)
             if code == 200 and j is not None:
-                arr = j if isinstance(j, list) else j.get("presets", [])
-                presets = [{"slot": p.get("slot", i+1), "name": p.get("name", f"slot{i+1}")} for i, p in enumerate(arr)]
+                arr = j if isinstance(j, list) else (j.get("presets", []) if isinstance(j, dict) else [])
+                presets = [{"slot": p.get("slot", i+1), "name": p.get("name", f"slot{i+1}")}
+                           for i, p in enumerate(arr) if isinstance(p, dict)]
                 return self._json(200, {"presets": presets})
-            return self._json(code, {"error": txt[:300], "presets": []})
+            return self._json(code if code != 200 else 502, {"error": txt[:300], "presets": []})
         if u.path == "/api/snapshot":
-            if not nvr.connected:
-                return self._json(401, {"error": "not connected"})
-            cam = qs.get("id", [""])[0]
+            err = self._need_cam(cam)
+            if err:
+                return self._json(*err)
             code, ctype, blob = nvr.snapshot(cam, hires=qs.get("hi", ["0"])[0] == "1")
             if code == 200 and blob:
+                if not (ctype or "").lower().startswith("image/"):
+                    ctype = "image/jpeg"
                 self.send_response(200)
-                self.send_header("Content-Type", ctype or "image/jpeg")
+                self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(blob)))
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
                 self.wfile.write(blob)
                 return
-            return self._json(code or 502, {"error": "snapshot failed"})
+            return self._json(code if code and code != 200 else 502, {"error": "snapshot failed"})
         if u.path == "/api/camera":
-            if not nvr.connected:
-                return self._json(401, {"error": "not connected"})
-            cam = qs.get("id", [""])[0]
+            err = self._need_cam(cam)
+            if err:
+                return self._json(*err)
             code, j, txt = nvr.get_camera(cam)
-            if code == 200 and j is not None:
+            if code == 200 and isinstance(j, dict):
                 isp = j.get("ispSettings") or {}
                 fl  = (j.get("featureFlags") or {})
                 led = (j.get("ledSettings") or {})
@@ -1228,10 +1423,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "hasSpeaker":    bool(fl.get("hasSpeaker") or fl.get("speakerSettings")),
                     "hasMic":        bool(fl.get("hasMic") or fl.get("mic")),
                 })
-            return self._json(code, {"error": txt[:300]})
+            return self._json(code if code != 200 else 502, {"error": txt[:300]})
         self._json(404, {"error": "not found"})
 
-    def do_POST(self):
+    def _post(self):
+        global nvr
         u = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(u.query)
         body = self._read()
@@ -1239,36 +1435,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
             forget_config()
             return self._json(200, {"ok": True})
         if u.path == "/api/connect":
-            ip   = (body.get("ip") or "").strip()
-            user = (body.get("user") or "").strip()
-            pw   = body.get("pass") or ""
+            ip   = str(body.get("ip") or "").strip()
+            user = str(body.get("user") or "").strip()
+            pw   = str(body.get("pass") or "")
             remember     = bool(body.get("remember"))
             remember_pw  = bool(body.get("remember_password"))
             if not (ip and user and pw):
                 return self._json(400, {"error": "ip, user, pass all required"})
-            global nvr
-            nvr = Nvr(ip)
-            ok, msg = nvr.login(user, pw)
+            if not valid_nvr_host(ip):
+                return self._json(400, {"error": "NVR address must be a hostname or IP (optionally :port)"})
+            new = Nvr(ip)
+            ok, msg = new.login(user, pw)
             if not ok:
+                new.close()
                 return self._json(401, {"error": msg})
-            code, b, txt = nvr.bootstrap()
-            if code != 200 or not b:
-                return self._json(code, {"error": txt[:300]})
+            code, b, txt = new.bootstrap()
+            if code != 200 or not isinstance(b, dict):
+                new.close()
+                return self._json(code if code != 200 else 502, {"error": txt[:300]})
+            old, nvr = nvr, new
+            if old is not new:
+                old.close()
             if remember:
-                cfg = {
-                    "ip": ip,
-                    "user": user,
-                    "save_password": bool(remember_pw),
-                    "cam_settings": load_config().get("cam_settings", {}),
-                }
-                if remember_pw:
-                    backend = store_password(user, pw)
-                    if backend == "file":
-                        cfg["pass"] = pw
-                save_config(cfg)
+                with _config_lock:
+                    cfg = {
+                        "ip": ip,
+                        "user": user,
+                        "save_password": bool(remember_pw),
+                        "cam_settings": load_config().get("cam_settings", {}),
+                    }
+                    if remember_pw:
+                        backend = store_password(user, pw)
+                        if backend == "file":
+                            cfg["pass"] = pw
+                    else:
+                        delete_password(user)
+                    save_config(cfg)
             telegram_notify(f"Helmsman session started: {user}@{ip} ({len(b.get('cameras',[]))} cams)")
             cams = []
-            for c in b.get("cameras", []):
+            for c in b.get("cameras", []) or []:
+                if not isinstance(c, dict):
+                    continue
                 ff = c.get("featureFlags") or {}
                 ptz = bool(ff.get("isPtz") or c.get("ptzControlEnabled") or c.get("ptz"))
                 cams.append({
@@ -1280,86 +1487,66 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "ptz":    ptz,
                 })
             return self._json(200, {"cameras": cams})
-        if u.path == "/api/move":
-            if not nvr.connected:
-                return self._json(401, {"error": "not connected"})
+        if u.path == "/api/cam_settings":
             cam = body.get("id")
-            payload = body.get("payload") or {}
+            patch = body.get("patch")
+            if not valid_cam_id(cam) or not isinstance(patch, dict):
+                return self._json(400, {"error": "bad camera id or patch"})
+            cur = update_cam_settings(cam, patch)
+            return self._json(200, {"settings": cur})
+
+        # Everything below talks to the NVR for one camera.
+        cam = qs.get("id", [""])[0] if u.path == "/api/preset" else body.get("id")
+        err = self._need_cam(cam)
+        if err:
+            return self._json(*err)
+        if u.path == "/api/move":
+            payload = body.get("payload")
+            if not isinstance(payload, dict):
+                return self._json(400, {"error": "payload must be an object"})
             code, txt = nvr.move(cam, payload)
-            try:
-                j = json.loads(txt)
-            except Exception:
-                j = {"raw": txt[:300]}
             # First non-zero move of the session triggers a Telegram notification (rate-limited).
             try:
-                inner = (payload or {}).get("payload") or {}
+                inner = payload.get("payload") or {}
                 if any(abs(inner.get(k, 0)) > 50 for k in ("x", "y", "z")):
                     telegram_notify(f"Helmsman: PTZ command sent (cam={cam})")
             except Exception:
                 pass
-            return self._json(code, j)
+            return self._json(code, _parse_json(txt))
         if u.path == "/api/save_preset":
-            if not nvr.connected:
-                return self._json(401, {"error": "not connected"})
-            cam  = body.get("id")
-            name = (body.get("name") or "").strip()
+            name = str(body.get("name") or "").strip()
             code, txt = nvr.save_preset(cam, name)
-            try: j = json.loads(txt)
-            except: j = {"raw": txt[:300]}
-            return self._json(code, j)
-        if u.path == "/api/rename_preset":
-            if not nvr.connected:
-                return self._json(401, {"error": "not connected"})
-            cam  = body.get("id")
-            slot = int(body.get("slot", 1))
-            name = (body.get("name") or "").strip()
-            code, txt = nvr.rename_preset(cam, slot, name)
-            return self._json(code, {"raw": txt[:300]})
-        if u.path == "/api/delete_preset":
-            if not nvr.connected:
-                return self._json(401, {"error": "not connected"})
-            cam  = body.get("id")
-            slot = int(body.get("slot", 1))
-            code, txt = nvr.delete_preset(cam, slot)
-            return self._json(code, {"raw": txt[:300]})
+            return self._json(code, _parse_json(txt))
+        if u.path in ("/api/rename_preset", "/api/delete_preset", "/api/preset"):
+            try:
+                raw = qs.get("slot", ["1"])[0] if u.path == "/api/preset" else body.get("slot", 1)
+                slot = _parse_slot(raw)
+            except (TypeError, ValueError):
+                return self._json(400, {"error": "bad slot"})
+            if u.path == "/api/rename_preset":
+                code, txt = nvr.rename_preset(cam, slot, str(body.get("name") or "").strip())
+                return self._json(code, {"raw": txt[:300]})
+            if u.path == "/api/delete_preset":
+                code, txt = nvr.delete_preset(cam, slot)
+                return self._json(code, {"raw": txt[:300]})
+            code, txt = nvr.goto_preset(cam, slot)
+            return self._json(code, _parse_json(txt))
         if u.path == "/api/locate":
-            if not nvr.connected:
-                return self._json(401, {"error": "not connected"})
-            code, txt = nvr.locate(body.get("id"))
+            code, txt = nvr.locate(cam)
             return self._json(code, {"raw": txt[:300]})
         if u.path == "/api/flashlight":
-            if not nvr.connected:
-                return self._json(401, {"error": "not connected"})
-            code, txt = nvr.flashlight(body.get("id"), bool(body.get("enable")))
+            code, txt = nvr.flashlight(cam, bool(body.get("enable")))
             return self._json(code, {"raw": txt[:300]})
         if u.path == "/api/camera_patch":
-            if not nvr.connected:
-                return self._json(401, {"error": "not connected"})
-            cam   = body.get("id")
-            patch = body.get("patch") or {}
-            code, txt = nvr.patch_camera(cam, patch)
-            try: j = json.loads(txt)
-            except: j = {"raw": txt[:300]}
-            return self._json(code, j)
-        if u.path == "/api/cam_settings":
-            cam = body.get("id")
-            patch = body.get("patch") or {}
-            cur = update_cam_settings(cam, patch)
-            return self._json(200, {"settings": cur})
-        if u.path == "/api/preset":
-            if not nvr.connected:
-                return self._json(401, {"error": "not connected"})
-            cam = qs.get("id", [""])[0]
-            try:
-                slot = int(qs.get("slot", ["1"])[0])
-            except ValueError:
-                return self._json(400, {"error": "bad slot"})
-            code, txt = nvr.goto_preset(cam, slot)
-            try:
-                j = json.loads(txt)
-            except Exception:
-                j = {"raw": txt[:300]}
-            return self._json(code, j)
+            # Only the settings the UI exposes may be patched — this endpoint used to forward
+            # an arbitrary camera PATCH (recording, privacy masks, ...) from any caller.
+            patch = body.get("patch")
+            mode = ((patch or {}).get("ispSettings") or {}).get("irLedMode") if isinstance(patch, dict) else None
+            if not isinstance(patch, dict) or set(patch) != {"ispSettings"} \
+                    or set(patch["ispSettings"]) != {"irLedMode"} or mode not in IR_LED_MODES:
+                return self._json(400, {"error": "only ispSettings.irLedMode may be changed"})
+            code, txt = nvr.patch_camera(cam, {"ispSettings": {"irLedMode": mode}})
+            return self._json(code, _parse_json(txt))
         self._json(404, {"error": "not found"})
 
 
@@ -1368,14 +1555,27 @@ class ReuseTCPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+def browser_url(bind: str, port: int) -> str:
+    """URL to open locally. Wildcard binds are reachable on loopback; specific binds are not."""
+    if bind in ("", "0.0.0.0", "::"):
+        host = "127.0.0.1"
+    elif ":" in bind:
+        host = f"[{bind}]"
+    else:
+        host = bind
+    return f"http://{host}:{port}/"
+
+
 def main():
     print("Helmsman — UniFi Protect virtual joystick PTZ controller")
     print(f"  Listening on http://{BIND}:{PORT}")
-    print(f"  Open in your browser, fill in NVR IP / user / password, click Connect.")
+    print("  Open in your browser, fill in NVR IP / user / password, click Connect.")
     if DEFAULT_NVR_IP:
         print(f"  (Pre-fill from env: HELMSMAN_NVR_IP={DEFAULT_NVR_IP})")
+    if BIND not in ("127.0.0.1", "localhost", "::1"):
+        print("  WARNING: listening beyond loopback — the UI has no login; anyone who can reach this port can drive cameras.")
     httpd = ReuseTCPServer((BIND, PORT), Handler)
-    threading.Timer(0.5, lambda: webbrowser.open(f"http://{'127.0.0.1' if BIND in ('0.0.0.0', BIND) else BIND}:{PORT}/")).start()
+    threading.Timer(0.5, lambda: webbrowser.open(browser_url(BIND, PORT))).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
