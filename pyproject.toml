@@ -1,0 +1,18 @@
+[project]
+name = "helmsman"
+version = "0.3.1"
+description = "Virtual joystick PTZ controller for UniFi Protect"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 140
+target-version = "py310"
+extend-exclude = ["build/_pyi-work"]
+
+[tool.ruff.lint]
+# Correctness-focused set; style rules are left off to avoid churning the single-file app.
+select = ["E9", "F", "B", "PLE"]
+ignore = ["E701", "E702", "B904"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
