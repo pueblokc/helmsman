@@ -170,7 +170,7 @@ Below those: **invert X / Y / Z** checkboxes. Per-camera setting — useful when
 | `Shift` + arrow | Bigger bump (~600 steps) |
 | `+ / -` | Zoom in / out one step |
 | `1`–`9` | Jump to preset slot |
-| `H` | Jump to home preset |
+| `H` | Jump to home preset (Protect home slot `-1`) |
 
 These are **relative** moves (single bump, not continuous), so the camera stops automatically after each press.
 
@@ -179,10 +179,10 @@ These are **relative** moves (single bump, not continuous), so the camera stops 
 Helmsman reads any presets you've already saved in the Protect web UI and shows them as buttons in the lower-left. Click one to jump.
 
 - Slot numbers `1-9` are user-defined presets in Protect.
-- Greyed-out buttons mean no preset exists for that slot.
+- Empty slots show as `(n)`; plain-clicking them does nothing.
 - The "Refresh presets" button in the Diagnostics panel re-pulls the list (useful if you just created one in the Protect UI).
 
-- **Save current position** — `Shift`+click any empty preset slot. Helmsman prompts for a name, posts to the NVR, and refreshes the list.
+- **Save current position** — `Shift`+click any empty preset slot. Helmsman prompts for a name, posts to the NVR, and refreshes the list. Protect picks the slot number (next free slot), so the new preset may not land on the button you clicked.
 - **Rename** — `Shift`+click a filled slot.
 - **Delete** — `Alt`+click a filled slot. (Confirmation dialog first.)
 - **Refresh presets** — in the Diagnostics panel; re-pulls the list from the NVR.
@@ -253,12 +253,16 @@ export HELMSMAN_USER=localadmin
 export HELMSMAN_PASS=your-password
 export HELMSMAN_PORT=8765        # default 8765
 export HELMSMAN_BIND=127.0.0.1   # use 0.0.0.0 to listen on the LAN
+export HELMSMAN_ALLOWED_HOSTS=cams.example.lan   # extra hostnames the UI answers to (see below)
+export HELMSMAN_CONFIG_DIR=~/.helmsman          # where config.json lives
 python helmsman.py
 ```
 
 Anything not set → blank UI field. Anything set → pre-filled but still editable.
 
 > **`HELMSMAN_BIND=0.0.0.0`** exposes the joystick UI on your LAN. Anyone on the network can drive the camera — there's no auth on the local UI. Use only on trusted networks (or behind a reverse proxy with auth).
+
+> **Host names.** To block DNS-rebinding attacks the UI only answers requests whose `Host` is an IP address or `localhost`. If you reach it by a hostname (phone bookmark, reverse proxy), list that name in `HELMSMAN_ALLOWED_HOSTS` (comma-separated), or you'll get `403 host not allowed`.
 
 ---
 
@@ -281,8 +285,8 @@ You're hitting the move route, but the payload shape changed. The Helmsman UI bu
 If the NVR rejects this, check the error response — it usually tells you exactly which field is missing or out of range.
 
 ### Camera moves but in the wrong direction
-- **Stick up = camera looks down (or vice versa)** → some PTZ controllers use the inverse convention. Edit `helmsman.py`, find the `sy =` line in the `tick()` function, flip the sign.
-- **Camera mounted upside down** → check `featureFlags.isFlippedVertical` and `isFlippedHorizontal` in the bootstrap response. Helmsman does not currently auto-correct for these — flip the relevant axis manually.
+- **Stick up = camera looks down (or vice versa)** → tick **invert Y** under the Camera section. It's saved per camera.
+- **Camera mounted upside down** → Helmsman does not auto-read Protect's `isFlippedVertical/Horizontal`; tick **invert X** and/or **invert Y** for that camera.
 
 ### My USB joystick / gamepad isn't being detected
 Helmsman uses the browser's GamepadAPI. Plug in your controller, then **press any button on it** — most browsers don't expose a gamepad until you've interacted with it. Once detected, a 🎮 badge appears next to the connection status.
@@ -301,8 +305,10 @@ Most likely you have an old cached version after an update. Hard refresh with `C
 
 - Helmsman runs **locally**. All UI traffic stays on your machine.
 - The bridge **only** opens a connection from your machine to the NVR you specify.
-- Credentials are kept **in memory** in the Python process. Nothing is written to disk.
-- The local web UI has **no authentication** — anyone with access to `127.0.0.1:8765` can drive the camera. By default it binds to localhost only, which means only your machine can reach it.
+- Credentials are kept **in memory** unless you tick **remember** (NVR + username go to `~/.helmsman/config.json`) or **save password** (password goes to the OS keyring, or to `config.json` if no keyring is available). `config.json` is created owner-only (`0600`).
+- The local web UI has **no login** — any program on your machine that can reach `127.0.0.1:8765` can drive the camera. By default it binds to localhost only, which means only your machine can reach it.
+- Web pages you visit can't drive it: POSTs from another origin are rejected (CSRF check), the UI refuses to be framed, and requests with an unexpected `Host` header are rejected (DNS rebinding).
+- The NVR's HTTPS certificate is **not verified** (UniFi consoles ship self-signed certs). Only connect over a network you trust.
 - Setting `HELMSMAN_BIND=0.0.0.0` exposes it on your LAN. Don't do this on untrusted networks, or put a reverse proxy with auth in front.
 - The NVR session cookie is short-lived. If you leave the bridge idle long enough, you may need to reconnect.
 
@@ -323,7 +329,7 @@ The G5 PTZ datasheets warn that the motor isn't rated for sustained continuous o
 Should — the API surface is shared across PTZ models. We've confirmed it against G5 PTZ. Reports from G4 owners welcome.
 
 **Can it run in a tab on my phone?**
-Yes. The virtual stick handles touch + pointer events. Hit the URL from a phone on the same network (you'll need `HELMSMAN_BIND=0.0.0.0` or a reverse proxy).
+Yes. The virtual stick handles touch + pointer events. Hit the URL from a phone on the same network (you'll need `HELMSMAN_BIND=0.0.0.0` or a reverse proxy; browse to it by IP, or add the hostname to `HELMSMAN_ALLOWED_HOSTS`).
 
 **Where do the screenshots live in the repo?**
 `assets/` (PNGs + SVGs). The screenshot driver itself (`assets/.screenshot.py`) is excluded from packaging.

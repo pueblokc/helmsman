@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased (cloud-wave2 quality pass)
+
+- Security: local UI now rejects cross-origin POSTs (CSRF), unexpected `Host` headers (DNS rebinding; see `HELMSMAN_ALLOWED_HOSTS`) and framing. Camera IDs, NVR address and preset slots are validated. `/api/camera_patch` only accepts `ispSettings.irLedMode`.
+- Fix: "forget" now actually removes the keyring password.
+- Fix: config writes are atomic and created `0600`.
+- Fix: releasing a gamepad stick could leave the camera moving. Switching cameras mid-move now stops the old camera.
+- Fix: `H` goes to home preset slot `-1` (was `0`).
+- Fix: NVR/network errors return JSON errors instead of dropping the connection.
+- Added pytest suite, ruff config and GitHub Actions CI.
+
 ## v0.3 — 2026-05-06
 
 Big feature drop. All endpoints smoke-tested 17/17 against a live G5 PTZ.

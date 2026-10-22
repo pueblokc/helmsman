@@ -38,7 +38,7 @@ Spin up a single Python file, open the browser tab it pops, and drive any PTZ-ca
 - 🔍 **Separate zoom strip** for one-handed zoom
 
 ### Cameras
-- 🎯 **Inline preset save / rename / delete** — `Shift`+click an empty slot to save here
+- 🎯 **Inline preset save / rename / delete** — `Shift`+click an empty slot to save a new preset, `Shift`+click a saved one to rename, `Alt`+click to delete
 - 💡 **Camera controls** — locate, flashlight, IR night mode toggle
 - 🔄 **Per-camera axis flips** for upside-down mounts
 - 🎬 **Move recorder + scene replay** — record gestures, replay at original timing
@@ -49,7 +49,7 @@ Spin up a single Python file, open the browser tab it pops, and drive any PTZ-ca
 - ⌨️ **Panic stop** on `Esc`, gamepad Start, or big red button
 - 📏 **Speed limit / deadzone / send rate** sliders
 - 📊 **Live position + payload log** — see exactly what's being sent
-- 📱 **Telegram notifications** (optional) on session start + first PTZ command
+- 📱 **Telegram notifications** (optional) on session start + PTZ activity (rate-limited to 1/min)
 - 🎨 **Catppuccin Mocha** theme, KCCS branded
 - 📦 **Single Python file** OR **one-click Windows `.exe`** (~14 MB)
 
@@ -69,6 +69,16 @@ cd helmsman
 pip install -r requirements.txt
 python helmsman.py
 ```
+
+### Run the tests
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+python -m pytest -q
+```
+
+The tests use a fake NVR. They never touch the network.
 
 ### Build your own .exe
 
@@ -119,6 +129,8 @@ Browser opens to `http://127.0.0.1:8765`. Tick **remember** + **save password** 
 3. Forwards joystick deflection to Protect's continuous-move endpoint at your chosen rate
 
 The continuous-move endpoint is the **same internal API** the Protect web UI uses for click-to-move. We're inside the supported envelope, just exposing it as a stick.
+
+For module layout and data flow see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 > 🧪 **Want the full reverse-engineered API map?** See the [API Reference](docs/API-REFERENCE.md).
 
