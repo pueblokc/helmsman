@@ -85,7 +85,7 @@ python -m pytest -q
 - `tests/test_nvr.py` (10): exact URLs, headers and bodies sent to Protect; Telegram gating and throttle.
 - `tests/test_ui.py` (3): `node --check` on the embedded JS; home slot; no `innerHTML` with data.
 - **Manual:** headless Chromium drove the real page against the fake NVR. Connect worked; a stick drag gave 6 moves ending in a zero vector; `H` sent `goto -1`; invert-X persisted; no page errors.
-- **CI:** `.github/workflows/ci.yml` runs on push and PR, read-only permissions, no secrets. I couldn't watch the first Actions run from here; the Windows leg is the one I'm least sure of (`test_save_config_is_private_from_creation` is skipped on Windows).
+- **CI:** `.github/workflows/ci.yml` runs on push and PR, read-only permissions, no secrets. Run #1 on `44376ec` passed every leg: lint, plus pytest on Ubuntu and Windows with Python 3.10 and 3.13.
 
 ## Needs Justin
 
@@ -99,7 +99,7 @@ python -m pytest -q
    - NVR TLS pinning
    - Stop sending the saved password to the browser
 3. **Credentials to rotate:** none. No committed secrets were found in the tree or history.
-4. **Before the next `.exe` release:** rebuild with `requests>=2.32.4` (`pip install -U requests`), check the first CI run is green, then cut the release. I didn't tag or release.
+4. **Before the next `.exe` release:** rebuild with `requests>=2.32.4` (`pip install -U requests`), confirm CI is green on the final head, then cut the release. I didn't tag or release.
 
 ## Unsure about
 
