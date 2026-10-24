@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" width="1280" height="320" role="img" aria-label="Helmsman — virtual joystick PTZ controller">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"  stop-color="#1e1e2e"/>
+      <stop offset="100%" stop-color="#181825"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#89b4fa"/>
+      <stop offset="100%" stop-color="#cba6f7"/>
+    </linearGradient>
+    <radialGradient id="hub" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"  stop-color="#cba6f7"/>
+      <stop offset="60%" stop-color="#89b4fa"/>
+      <stop offset="100%" stop-color="#1e1e2e"/>
+    </radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#313244" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="320" fill="url(#bg)"/>
+  <rect width="1280" height="320" fill="url(#grid)" opacity="0.4"/>
+
+  <!-- wheel on left -->
+  <g transform="translate(160 160) scale(0.55)">
+    <g stroke="url(#rim)" stroke-width="6" stroke-linecap="round" fill="none">
+      <line x1="0" y1="-98" x2="0" y2="-62"/>
+      <line x1="0" y1="98"  x2="0" y2="62"/>
+      <line x1="-98" y1="0" x2="-62" y2="0"/>
+      <line x1="98"  y1="0" x2="62" y2="0"/>
+      <line x1="-70" y1="-70" x2="-44" y2="-44"/>
+      <line x1="70" y1="70"   x2="44" y2="44"/>
+      <line x1="70" y1="-70"  x2="44" y2="-44"/>
+      <line x1="-70" y1="70"  x2="-44" y2="44"/>
+    </g>
+    <circle r="78" fill="none" stroke="url(#rim)" stroke-width="12"/>
+    <g stroke="#cba6f7" stroke-width="4" stroke-linecap="round">
+      <line x1="0" y1="-62" x2="0" y2="-28"/>
+      <line x1="0" y1="62"  x2="0" y2="28"/>
+      <line x1="-62" y1="0" x2="-28" y2="0"/>
+      <line x1="62"  y1="0" x2="28" y2="0"/>
+    </g>
+    <circle r="36" fill="url(#hub)"/>
+    <circle r="36" fill="none" stroke="#cba6f7" stroke-width="2"/>
+    <g fill="#11111b" opacity="0.85">
+      <polygon points="0,-26 22,-14 8,8" transform="rotate(0)"/>
+      <polygon points="0,-26 22,-14 8,8" transform="rotate(45)"/>
+      <polygon points="0,-26 22,-14 8,8" transform="rotate(90)"/>
+      <polygon points="0,-26 22,-14 8,8" transform="rotate(135)"/>
+      <polygon points="0,-26 22,-14 8,8" transform="rotate(180)"/>
+      <polygon points="0,-26 22,-14 8,8" transform="rotate(225)"/>
+      <polygon points="0,-26 22,-14 8,8" transform="rotate(270)"/>
+      <polygon points="0,-26 22,-14 8,8" transform="rotate(315)"/>
+    </g>
+    <circle r="9" fill="#11111b"/>
+    <circle r="9" fill="none" stroke="#89b4fa" stroke-width="1.5"/>
+    <circle r="2.5" cx="-3" cy="-3" fill="#cdd6f4"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="320" y="170" font-family="ui-monospace, Cascadia Code, Consolas, monospace"
+        font-size="86" font-weight="700" fill="#cdd6f4" letter-spacing="6">HELMSMAN</text>
+  <text x="324" y="218" font-family="ui-monospace, Cascadia Code, Consolas, monospace"
+        font-size="22" fill="#a6adc8" letter-spacing="3">VIRTUAL  JOYSTICK  ·  UNIFI  PROTECT  PTZ</text>
+
+  <!-- right-side accent: tiny axis indicator -->
+  <g transform="translate(1100 160)" stroke-linecap="round">
+    <circle r="80" fill="none" stroke="#313244" stroke-width="1.5"/>
+    <line x1="-80" y1="0" x2="80" y2="0" stroke="#313244" stroke-width="1"/>
+    <line x1="0" y1="-80" x2="0" y2="80" stroke="#313244" stroke-width="1"/>
+    <circle r="48" fill="none" stroke="#45475a" stroke-width="1" stroke-dasharray="4 4"/>
+    <circle cx="34" cy="-22" r="14" fill="#89b4fa"/>
+    <line x1="0" y1="0" x2="34" y2="-22" stroke="#cba6f7" stroke-width="2.5"/>
+    <text x="0" y="115" text-anchor="middle" font-family="ui-monospace, monospace"
+          font-size="14" fill="#a6adc8">x:340  y:-220</text>
+  </g>
+</svg>

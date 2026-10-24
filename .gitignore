@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+*.log
+
+# screenshot driver + smoke test — internal, not shipped
+assets/.screenshot.py
+.smoke-test.py
+
+# build artifacts
+dist/
+build/_pyi-work/
+build/*.spec
+build/helmsman.ico
+.helmsman-test*/
